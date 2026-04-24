@@ -129,5 +129,4 @@ def plot_mesh_with_segmentation(
         plotter.add_mesh(
             path_mesh, point_size=10, scalars="relative_lengths", render_points_as_spheres=True
         )
-
     plotter.show()
