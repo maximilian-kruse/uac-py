@@ -16,11 +16,11 @@ change → run checks → review diff.
   `--pypi` only if not on conda-forge — `libigl`/`meshlib` are pypi-only, rest is conda-forge).
   Never hand-edit `pixi.lock`; commit it with `pyproject.toml` (holds all pixi config, no
   `pixi.toml`).
-- Envs: `default` (numpy/pyvista/igraph/numba/msgspec/libigl/meshlib/shapely), `dev` (+ruff,
+- Envs: `default` (numpy/pyvista/igraph/numba/libigl/meshlib/shapely), `dev` (+ruff,
   pre-commit), `examples` (+jupyter, plotting, trame), `test` (+pytest, pytest-cov). `meshlib` is a
   base dependency (not `examples`-only) since `test` needs it too, to import `basis.py` (whose
   hole-filling helper uses it) for `test/test_basis.py`'s unit tests. Tools need `-e`:
-  - `pixi run -e dev ruff check src applications` / `ruff format src applications`
+  - `pixi run -e dev ruff check src test notebooks` / `ruff format src test notebooks`
   - `pixi run -e test pytest`
   - `pixi run -e examples jupyter lab`
 - `python` pinned `>=3.14`, `pyvista` pinned `>=0.49`: `pyvista==0.46.4` breaks on 3.14's `typing`
@@ -38,12 +38,9 @@ change → run checks → review diff.
   independent of build-dependency order (`common.dict_utils.KeySequence`), plus the `EndpointKind`/`PositionKind`
   enums they use and, in the same module, the computed counterparts (`ParameterizedPath`,
   `UACPath`, `Submesh`, `UACSubmesh`). `names.py` — generic vocabulary as `StrEnum`/`IntEnum`
-  groups (`PlanarBearing` directions, `OstiumLoop`, `AtrialStructure`,
-  `AnatomicalDirection`, `Axis`, `Winding`) anatomy configs import rather than retyping as string literals — a typo is
-  an `AttributeError` at import time instead of a silently-wrong new dict key. `config_factory.py` —
-  builders for the two patterns most configs need: `pv_config` (a PV-style ostium: concentric
-  marker loops + radial spokes + segments) and `connector_path`/`connector_parameterization`/
-  `straight_connector` (a shortest-path connector between two points, linearly parameterized).
+  groups (`OstiumLoop`, `AtrialStructure`,
+  `AnatomicalDirection`, `Axis`, `OstiumSegment`) anatomy configs import rather than retyping as string literals — a typo is
+  an `AttributeError` at import time instead of a silently-wrong new dict key.
   `graph.py` — `link()` resolves a config's key-sequence references into a `ConstructionGraph` of
   live `Node` objects (one `PathNode`/`MarkerNode`/`ParameterizationNode`/`UACMappingNode`/
   `SegmentNode` per entry, key-sequence fields replaced by direct references to the nodes they
@@ -55,17 +52,17 @@ change → run checks → review diff.
   via igraph, region flood-fill via numba, arclength/UAC parameterization along a path). `UACSubmesh.to_polydata` (in `model.py`) is the one place a
   `UACSubmesh`'s `(alpha, beta)` + `connectivity` becomes a flat z=0 pyvista mesh — `check.py`,
   `mapper.py`, and `visualization.py` all build one for area checks or plotting, so it isn't
-  re-derived three separate times). `constructor.py` — also holds the nested-dict type aliases (`MarkerDict`,
-  `UACSubmeshDict`, …) and `UACConstructor`, a thin
+  re-derived three separate times). `constructor.py` — `UACConstructor`, a thin
   orchestrator over a linked `ConstructionGraph`: it decides *what order* to do work in
   (`construct_segmentation` derives its own order with a `networkx` topological sort over each
   node's `dependencies`, since paths/markers/parameterizations feed each other back and forth, not
   in fixed phases; `construct_uacs` runs the remaining fixed phases), but never *how* an individual
   node is computed — that split keeps `UACConstructor` from being both the thing that sequences
-  work and the thing that implements every kind of it. `.data` materializes the graph's results
-  back into nested dicts (`UACData`) on read, since that nested-dict shape is the pipeline's
-  external contract — `check.py`/`visualization.py`/`serialization.py`/notebooks all consume it
-  that way, via `common.dict_utils`. `check.py` — three independent validity checks, each catching
+  work and the thing that implements every kind of it. `.data` collects the graph's results into
+  `UACData` on read: flat dicts keyed by each entry's full key sequence as a tuple, e.g.
+  `uac_submesh_data[("LIPV", "segment_1")]` — the pipeline's external contract, consumed that way by
+  `check.py`/`output/`/`mapper.py`/notebooks. Only the *authored* config is nested; `graph.link`
+  flattens it once via `dict_utils.flatten`, and nothing else walks nested dicts. `check.py` — three independent validity checks, each catching
   a defect the others can't: `check_uac_mesh_validity` (per-submesh fold-overs, via cell area),
   `check_segment_boundary_multiplicity` (structural, config-only, no mesh needed — every boundary
   *portion* a `Segment` references should be shared by exactly 1 or 2 segments; grouped by
@@ -75,34 +72,32 @@ change → run checks → review diff.
   genuine holes at the PV/MV/LAA openings, so "no gaps" isn't a valid generic invariant here).
 - `common/`: `mvc.py`/`jacobian.py` are the numeric core (mean-value coordinates, per-triangle
   Jacobians) — keep pyvista-free. `mesh_utils.py` — pyvista/trimesh preprocessing.
-  `dict_utils.py` — treats anatomical-path tuples (`("LIPV","inner","mitral")`) as keys into
-  nested dicts (the pipeline's external data contract, and `mapper.py`'s internal one; the
-  `KeySequence` type lives here); use
-  `nested_dict_keys`/`get_dict_entry`/`set_dict_entry`/`build_nested_dict`, don't hand-roll.
+  `dict_utils.py` — `KeySequence` (an address into a nested config dict), `KeySequenceDict[T]` (a flat
+  dict keyed by full key-sequence tuples) and `flatten` (nested config -> keyed entries).
   `common/` is the base layer: it imports nothing else from `uacpy`.
-- `output/`: `serialization.py` (msgpack) and `visualization.py` (pyvista plots) are pipeline
+- `output/`: `serialization.py` (NumPy `.npz`, one array per `UACSubmesh` field, named `key/parts/field`) and `visualization.py` (pyvista plots) are pipeline
   consumers — they import `construction`/`mapper`, so they must not live in `common/`.
   `logging.py` (`format_key`, `print_with_underline`) is the progress-log helper the pipeline
   itself calls; it imports only `common`, so `construction` can depend on it without a cycle.
 - `basis.py`/`mapper.py`: cross-patient transfer. `basis.py` builds a per-cell tangent basis from
   a smooth whole-mesh parameterization; `mapper.py`'s `UACMapper` moves scalar/vector fields
-  between the original mesh, its UAC submeshes, and another patient's, via cached Jacobians. Fiber fields are axial, so transfer them with
-  `interpolate_axial_vectors_to_other_uac_mesh` (doubled-angle resampling, `TransferMethod.NEAREST` or
-  `LINEAR`), never as plain vectors through `interpolate_to_other_uac_mesh`.
+  between the original mesh, its UAC submeshes, and another patient's, via cached Jacobians. Transfer between patients is a nearest-neighbor copy (no averaging), so
+  fiber fields, being axial, need no special treatment: use `interpolate_to_other_uac_mesh`.
 - `anatomies/`: one subpackage per anatomy, each a full `construction`-pipeline config — installed
   library code, not application data, so it's importable without any `sys.path` hacks.
-  `anatomies/left_atrium_4_pvs/parameterization.py` hardcodes one LA topology (4 PVs + LAA + MV);
-  built from `construction.config_factory`'s builders (e.g. the 4 PVs are 4 `config_factory.pv_config(...)` calls, not
-  ~250 hand-written lines each) plus a handful of genuinely one-off structures (MV, LAA, the 8
-  non-PV `Segment`s) written directly as `model` dataclasses.
+  `anatomies/left_atrium_4_pvs/` hardcodes one LA topology (4 PVs + LAA + MV) and is written out
+  explicitly as plain nested dicts of `model` dataclasses, one module per config kind (`paths`,
+  `parameterizations`, `markers`, `uacs`, `segments`), re-exported by the package. Deliberately
+  not generated by builders: the repetitive PV blocks stay readable and individually editable. The
+  package docstring has the chart layout.
   All anatomy-config identifiers are `StrEnum`/`IntEnum` members from the single
   `construction/names.py`, split by divider into a generic section and an LA-specific section
   (`RoofConnector`, `MitralConnector`, `MitralVariant`, `SegmentId`, `MITRAL`); none is a bare
-  string literal typed inline in `parameterization.py`. Anatomy-specific *vocabulary* belongs in
+  string literal typed inline in those modules. Anatomy-specific *vocabulary* belongs in
   that LA-specific section of `names.py` (a new anatomy adds its own section there); a new
   anatomy is otherwise a new subpackage here, built the same way — never an anatomy-specific
   *branch of logic* in `construction/`, `mapper.py`, or `common/`.
-- `applications/`: notebooks only — thin orchestration that reads a mesh, builds
+- `notebooks/`: notebooks only — thin orchestration that reads a mesh, builds
   `UACConstructorSettings` from an `anatomies.<name>` config, and runs the pipeline. No anatomy
   data belongs here. Notebooks run in order: `preprocess_mesh` → `la_construction` → `la_basis` →
   `la_mapping`.

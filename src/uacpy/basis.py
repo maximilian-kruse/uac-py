@@ -1,0 +1,199 @@
+"""Per-cell tangent basis for a whole LA mesh, from one smooth disk parameterization.
+
+Used for cross-patient transfer (`mapper.py`) of fields defined on the *original* mesh (as opposed
+to the per-segment UAC submeshes): a single mean-value-coordinate map of the whole mesh onto a
+disk gives every cell a smooth, mesh-wide 2D coordinate, whose Jacobian's orthonormalized columns
+are that cell's own tangent-plane basis vectors.
+
+MVC needs a simply-connected, convex domain, but the raw LA mesh has several boundary loops:
+the mitral valve (MV) opening and one per pulmonary vein (PV). The PV holes are therefore closed
+temporarily, which leaves the MV loop as the outer boundary of the disk; it is mapped to a circle.
+After the mapping the PV holes are "reopened": the added fill vertices and triangles are dropped,
+and the Jacobians are taken on the original mesh's own triangles only.
+"""
+
+import igl
+import meshlib.mrmeshnumpy as mrmeshnumpy
+import meshlib.mrmeshpy as mrmeshpy
+import numpy as np
+import pyvista as pv
+
+from uacpy.common import jacobian, mvc
+
+
+# ==================================================================================================
+def construct_cellwise_basis(
+    mesh: pv.PolyData, exterior_boundary_tag: int, exterior_boundary_radius: float
+) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+    """Construct an orthonormal 3D tangent-plane basis for every cell of `mesh`.
+
+    The PV holes are closed temporarily and the mitral-valve boundary, now the outer boundary of
+    the resulting disk, is mapped to a circle to anchor the smooth parameterization
+    `_construct_smooth_parameterization` builds. Only the original mesh's triangles enter the
+    Jacobians (the PV holes are "reopened").
+
+    Args:
+        mesh: Triangle surface mesh with `anatomical_tags` cell data.
+        exterior_boundary_tag: Tag value in `anatomical_tags` identifying the mitral-valve
+            boundary region.
+        exterior_boundary_radius: Radius of the circle the exterior boundary is mapped to, in
+            parameterization units.
+
+    Returns:
+        A tuple `(basis_vectors, mvc_coordinates, cellwise_jacobians)`:
+
+        - `basis_vectors`: shape `(n_cells, 3, 2)`, each cell's own orthonormal tangent-plane
+          basis, for `mapper.py`-style vector transfer.
+        - `mvc_coordinates`: shape `(n_vertices, 2)`, the underlying smooth parameterization.
+        - `cellwise_jacobians`: shape `(n_cells, 3, 2)`, the raw, pre-orthonormalization Jacobian
+          each basis was derived from.
+    """
+    simplices = np.array(mesh.faces.reshape(-1, 4)[:, 1:4])
+    mvc_coordinates = _construct_smooth_parameterization(
+        mesh, exterior_boundary_tag, exterior_boundary_radius
+    )
+    cellwise_jacobians = jacobian.compute_cellwise_jacobians(
+        vertices_3d=mesh.points, vertices_2d=mvc_coordinates, simplices=simplices
+    )
+    basis_vectors = _orthonormalize_jacobian_columns(cellwise_jacobians)
+    return basis_vectors, mvc_coordinates, cellwise_jacobians
+
+
+# --------------------------------------------------------------------------------------------------
+def _construct_smooth_parameterization(
+    mesh: pv.PolyData, exterior_boundary_tag: int, exterior_boundary_radius: float
+) -> np.ndarray:
+    """A whole-mesh mean value parameterization onto a disk, exterior loop mapped to a circle.
+
+    `mvc.compute_mean_value_coordinates` needs a topological disk (a mesh with exactly one
+    boundary loop); the PV openings make the raw LA mesh have several besides the MV loop, so the
+    PV holes are filled in first (`_create_mesh_with_holes_filled`) purely to make MVC well-posed.
+    The MV loop is then the disk's one boundary. The added fill-vertices' own coordinates
+    (`[len(vertices):]`) are discarded from the result ("reopening" the PV holes), since only the
+    original mesh's own parameterization is wanted.
+    """
+    vertices = np.array(mesh.points)
+    simplices = np.array(mesh.faces.reshape(-1, 4)[:, 1:4])
+    exterior_loop = _find_exterior_boundary(mesh, exterior_boundary_tag)
+    extended_vertices, extended_simplices = _create_mesh_with_holes_filled(
+        simplices, vertices, exterior_loop
+    )
+    boundary_x_coords, boundary_y_coords = _map_path_to_circle(
+        radius=exterior_boundary_radius, path=exterior_loop
+    )
+    exterior_boundary_coords = np.stack((boundary_x_coords, boundary_y_coords), axis=1)
+    mvc_coordinates = mvc.compute_mean_value_coordinates(
+        extended_vertices, extended_simplices, exterior_loop, exterior_boundary_coords
+    )
+    mvc_coordinates = mvc_coordinates[: len(vertices)]
+    return mvc_coordinates
+
+
+# --------------------------------------------------------------------------------------------------
+def _find_exterior_boundary(mesh: pv.PolyData, exterior_boundary_tag: int) -> np.ndarray:
+    """Find which of `mesh`'s boundary loops (MV plus one per PV) is the exterior (MV) one.
+
+    Asserts there is exactly one: more than one loop touching `exterior_boundary_tag`'s vertices
+    would mean the tag itself is malformed (split across disconnected regions), which
+    `mesh_utils.fix_feature_tag_defects` should already have ruled out upstream.
+    """
+    simplices = np.array(mesh.faces.reshape(-1, 4)[:, 1:4])
+    exterior_boundary_tags = mesh.extract_values(exterior_boundary_tag, scalars="anatomical_tags")
+    exterior_boundary_inds = exterior_boundary_tags.point_data["vtkOriginalPointIds"]
+    boundary_loops = igl.boundary_loop_all(simplices)
+
+    interior_loops = []
+    exterior_loop = None
+    for boundary_loop in boundary_loops:
+        if set(boundary_loop).intersection(set(exterior_boundary_inds)):
+            exterior_loop = boundary_loop
+        else:
+            interior_loops.append(boundary_loop)
+    assert exterior_loop is not None, "No exterior loop found in the mesh."
+    assert len(interior_loops) + 1 == len(boundary_loops), (
+        "More than one exterior loop found in the mesh."
+    )
+    return exterior_loop
+
+
+# --------------------------------------------------------------------------------------------------
+def _create_mesh_with_holes_filled(
+    simplices: np.ndarray, vertices: np.ndarray, exterior_boundary_inds: np.ndarray
+) -> tuple[np.ndarray, np.ndarray]:
+    """Temporarily fill every boundary loop of a mesh *except* the exterior (MV) one, via `meshlib`.
+
+    `igl` (used elsewhere in this module) has no hole-filling of its own, hence the `meshlib`
+    dependency for this one step. `findHoleRepresentiveEdges` returns one representative edge per
+    hole; `_find_exterior_edge_id` picks out the exterior one so it's excluded from
+    `hole_edges`/left unfilled, since only the PV holes need filling to make the mesh MVC-ready --
+    the MV loop is the boundary condition, not a hole to close.
+    """
+    meshlib_mesh = mrmeshnumpy.meshFromFacesVerts(simplices, vertices)
+    hole_edges = meshlib_mesh.topology.findHoleRepresentiveEdges()
+    exterior_boundary_ind = _find_exterior_edge_id(meshlib_mesh, hole_edges, exterior_boundary_inds)
+    del hole_edges[exterior_boundary_ind]
+    params = mrmeshpy.FillHoleParams()
+    new_faces_bitset = mrmeshpy.FaceBitSet()
+    params.outNewFaces = new_faces_bitset
+    for edge_id in hole_edges:
+        mrmeshpy.fillHole(meshlib_mesh, edge_id, params)
+    extended_vertices = mrmeshnumpy.getNumpyVerts(meshlib_mesh)
+    extended_simplices = mrmeshnumpy.getNumpyFaces(meshlib_mesh.topology)
+    return extended_vertices, extended_simplices
+
+
+# --------------------------------------------------------------------------------------------------
+def _find_exterior_edge_id(
+    meshlib_mesh: mrmeshpy.Mesh, hole_edges: list, exterior_boundary_inds: np.ndarray
+) -> int:
+    """Find the hole edge whose origin vertex lies on the exterior boundary."""
+    for i, edge_id in enumerate(hole_edges):
+        if int(meshlib_mesh.topology.org(edge_id)) in exterior_boundary_inds:
+            return i
+    raise ValueError("No edge found with origin in the exterior boundary.")
+
+
+# --------------------------------------------------------------------------------------------------
+def _map_path_to_circle(radius: float, path: np.ndarray) -> tuple[np.ndarray, np.ndarray]:
+    """Place a loop's vertices evenly spaced around a circle, in their given order.
+
+    This is the boundary condition that anchors the whole-mesh MVC parameterization: since `path`
+    is already an ordered loop, evenly spacing it by *index* (not by its own arclength) is the
+    simplest boundary map that keeps the loop simple (non-self-intersecting), which is all MVC
+    needs from its boundary condition.
+    """
+    x_coordinates = np.zeros(len(path))
+    y_coordinates = np.zeros(len(path))
+
+    for i, _ in enumerate(path):
+        angle = i / len(path) * 2 * np.pi
+        x_coordinates[i] = radius * np.cos(angle)
+        y_coordinates[i] = radius * np.sin(angle)
+
+    return x_coordinates, y_coordinates
+
+
+# --------------------------------------------------------------------------------------------------
+def _orthonormalize_jacobian_columns(cellwise_jacobians: np.ndarray) -> np.ndarray:
+    """Gram-Schmidt each cell's two Jacobian columns into an orthonormal tangent-plane basis.
+
+    A Jacobian's columns span the right tangent plane but generally aren't orthonormal themselves
+    (the underlying (alpha, beta) parameterization isn't conformal); Gram-Schmidt on the first
+    column, then the second against it, gives an orthonormal basis spanning that same plane exactly
+    (see `test_basis.py::test_orthonormalize_jacobian_columns_preserves_the_tangent_plane`).
+    """
+    first_basis_vector = cellwise_jacobians[..., 0]
+    second_basis_vector = cellwise_jacobians[..., 1]
+
+    first_basis_vector = first_basis_vector / np.linalg.norm(
+        first_basis_vector, axis=1, keepdims=True
+    )
+    second_basis_vector = (
+        second_basis_vector
+        - np.einsum("ni,ni->n", first_basis_vector, second_basis_vector)[:, None]
+        * first_basis_vector
+    )
+    second_basis_vector = second_basis_vector / np.linalg.norm(
+        second_basis_vector, axis=1, keepdims=True
+    )
+    return np.stack([first_basis_vector, second_basis_vector], axis=-1)
