@@ -1,111 +1,148 @@
-[project]
-authors = [{ name = "Maximilian Kruse", email = "maxkruse1604@gmail.com" }]
-maintainers = [{ name = "Maximilian Kruse", email = "maxkruse1604@gmail.com" }]
-description = "Universal Coordinates for the Left Atrium "
-name = "ulac"
-requires-python = ">=3.13"
-dynamic = ["version"]
-readme = "README.md"
-license = { text = "MIT" }
-keywords = [""]
-classifiers = [
-  "Development Status :: 3 - Alpha",
-  "Operating System :: POSIX :: Linux",
-  "Programming Language :: Python :: 3",
-  "Intended Audience :: Science/Research",
-  "License :: OSI Approved :: MIT License",
-]
+# ==================================================================================================
+# Build System
+# ==================================================================================================
 
-
-# --------------------------------------------------------------------------------------------------
-dependencies = [
-    "fast-simplification>=0.1.13",
-    "h5py>=3.16.0",
-    "igraph>=1.0.0",
-    "libigl>=2.6.1",
-    "msgspec>=0.20.0",
-    "networkx>=3.6.1",
-    "numba>=0.62.1",
-    "numpy>=2.3.4",
-    "python-igraph>=1.0.0",
-    "pyvista[all]==0.46.4",
-    "trimesh>=4.9.0",
-]
-
-[dependency-groups]
-dev = [
-    "pre-commit>=4.3.0",
-    "ruff>=0.14.2",
-]
-examples = [
-    "jupyter>=1.1.1",
-    "matplotlib>=3.10.7",
-    "pandas>=2.3.3",
-    "seaborn>=0.13.2",
-    "trame>=3.12.0",
-    "trame-vtk>=2.10.0",
-    "trame-vuetify>=3.1.0",
-    "trame-server<3.7",
-    "meshlib>=3.1.1.92",
-]
-
-
-# --------------------------------------------------------------------------------------------------
 [build-system]
 requires = ["hatchling", "hatch-vcs"]
 build-backend = "hatchling.build"
 
+
+# ==================================================================================================
+# Project Metadata
+# ==================================================================================================
+
+[project]
+name = "uac-py"
+dynamic = ["version"]
+description = "Universal Coordinates for the Left Atrium"
+authors = [{ name = "Maximilian Kruse", email = "maxkruse1604@gmail.com" }]
+maintainers = [{ name = "Maximilian Kruse", email = "maxkruse1604@gmail.com" }]
+requires-python = ">=3.14"
+readme = "README.md"
+license = { text = "MIT" }
+classifiers = [
+  "Development Status :: 3 - Alpha",
+  "Intended Audience :: Science/Research",
+  "License :: OSI Approved :: MIT License",
+  "Operating System :: POSIX :: Linux",
+  "Programming Language :: Python :: 3",
+]
+dependencies = []
+
+
+# ==================================================================================================
+# Hatch (Build & Versioning)
+# ==================================================================================================
+
 [tool.hatch.version]
 source = "vcs"
+raw-options = { fallback_version = "0.0.0" }
 
-[tool.uv]
-environments = ["sys_platform == 'linux'"]
-cache-keys = [
-  { file = "pyproject.toml" },
-  { git = { commit = true, tags = true } },
-]
-default-groups = []
+[tool.hatch.build.hooks.vcs]
+version-file = "src/uacpy/_version.py"
+
+[tool.hatch.build.targets.wheel]
+packages = ["src/uacpy"]
 
 
-# --------------------------------------------------------------------------------------------------
+# ==================================================================================================
+# Pixi (Environment Management)
+# ==================================================================================================
+
+[tool.pixi.workspace]
+channels = ["conda-forge"]
+platforms = ["linux-64"]
+
+# --- Base dependencies ----------------------------------------------------------------------------
+
+[tool.pixi.dependencies]
+python = ">=3.14"
+fast-simplification = ">=0.1.13"
+h5py = ">=3.16.0"
+python-igraph = ">=1.0.0"
+networkx = ">=3.6.1"
+numba = ">=0.62.1"
+numpy = ">=2.3.4"
+pyvista = ">=0.49"
+trimesh = ">=4.9.0"
+shapely = ">=2.1.2,<3"
+
+[tool.pixi.pypi-dependencies]
+uac-py = { path = ".", editable = true }
+libigl = ">=2.6.1"
+meshlib = ">=3.1.1.92"
+
+# --- Features -------------------------------------------------------------------------------------
+
+[tool.pixi.feature.dev.dependencies]
+pre-commit = ">=4.3.0"
+ruff = ">=0.14.2"
+
+[tool.pixi.feature.examples.dependencies]
+jupyter = ">=1.1.1"
+matplotlib = ">=3.10.7"
+pandas = ">=2.3.3"
+seaborn = ">=0.13.2"
+trame = ">=3.12.0"
+trame-vtk = ">=2.10.0"
+trame-vuetify = ">=3.1.0"
+trame-server = "<3.7"
+
+[tool.pixi.feature.test.dependencies]
+pytest = ">=9.1.1"
+pytest-cov = ">=7.1.0"
+
+# --- Environments ---------------------------------------------------------------------------------
+
+[tool.pixi.environments]
+default = { solve-group = "default" }
+dev = { features = ["dev"], solve-group = "default" }
+examples = { features = ["examples"], solve-group = "default" }
+test = { features = ["test"], solve-group = "default" }
+
+# --- Tasks ----------------------------------------------------------------------------------------
+
+[tool.pixi.tasks]
+
+
+# ==================================================================================================
+# Ruff (Linting & Formatting)
+# ==================================================================================================
+
 [tool.ruff]
 line-length = 100
 
 [tool.ruff.lint]
-select = ["ALL"]
-ignore = [
-  "COM812",
-  "EM101",
-  "EM102",
-  "FBT001",
-  "FBT003",
-  "F722",
-  "F821",
-  "ISC001",
-  "PD008",
-  "PD011",
-  "PLR2004",
-  "PT003",
-  "RET504",
-  "S101",
-  "TRY003",
+select = [
+  "E",      # pycodestyle errors
+  "W",      # pycodestyle warnings
+  "F",      # Pyflakes
+  "I",      # isort
+  "UP",     # pyupgrade
+  "B",      # flake8-bugbear
+  "SIM",    # flake8-simplify
+  "TID252", # flake8-tidy-imports: relative imports
 ]
-per-file-ignores = { "test/*" = ["ANN001", "ANN201", "D100", "D103", "D104", "INP001", "SLF001"] }
-pydocstyle.convention = "google"
+
+[tool.ruff.lint.flake8-tidy-imports]
+ban-relative-imports = "all"
 
 
-# --------------------------------------------------------------------------------------------------
+# ==================================================================================================
+# Pytest
+# ==================================================================================================
+
 [tool.pytest.ini_options]
 testpaths = ["test"]
 addopts = [
   "-v",
+  "--strict-markers",
   "--import-mode=importlib",
-  "--cov=ulac",
+  "--cov=uacpy",
   "--cov-config=.coveragerc",
 ]
 markers = [
   "unit: unit tests",
   "integration: integration tests",
-  "compile: requires compilation",
   "slow: tests with long runtime",
 ]

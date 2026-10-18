@@ -1,0 +1,168 @@
+# CLAUDE.md
+
+This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+
+# uac-py
+Universal Atrial Coordinates for the left atrium: parameterizes an LA surface mesh into
+anatomically-segmented (α, β) charts (PVs, roof, mitral valve, appendage) so scalar/vector fields
+(e.g. fiber orientation) transfer between patients through a shared coordinate system. Python
+≥3.14, NumPy/pyvista/igraph/numba. Alpha stage, single author.
+
+**Procedure (non-trivial tasks):** inspect code/conventions → short plan → smallest appropriate
+change → run checks → review diff.
+
+## Environment (pixi)
+- NEVER bare `python`/`pip`/`conda`; always `pixi run ...`. Ask before adding deps (`pixi add`,
+  `--pypi` only if not on conda-forge — `libigl`/`meshlib` are pypi-only, rest is conda-forge).
+  Never hand-edit `pixi.lock`; commit it with `pyproject.toml` (holds all pixi config, no
+  `pixi.toml`).
+- Envs: `default` (numpy/pyvista/igraph/numba/msgspec/libigl/meshlib/shapely), `dev` (+ruff,
+  pre-commit), `examples` (+jupyter, plotting, trame), `test` (+pytest, pytest-cov). `meshlib` is a
+  base dependency (not `examples`-only) since `test` needs it too, to import `basis.py` (whose
+  hole-filling helper uses it) for `test/test_basis.py`'s unit tests. Tools need `-e`:
+  - `pixi run -e dev ruff check src applications` / `ruff format src applications`
+  - `pixi run -e test pytest`
+  - `pixi run -e examples jupyter lab`
+- `python` pinned `>=3.14`, `pyvista` pinned `>=0.49`: `pyvista==0.46.4` breaks on 3.14's `typing`
+  internals, so the two move together — don't drop either pin without re-testing the notebooks
+  and `test/`. `pyvista`'s VTK internals changed how chained-extraction filters (`extract_feature_
+  edges`, `connectivity`/`split_bodies`) handle the reserved `vtkOriginalPointIds` field across
+  this version jump — see `geometry.py`'s `get_feature_boundary`/`extract_region_from_boundary`
+  for the workarounds, and don't assume this array means the same thing in both versions.
+
+## Architecture
+- `construction/`: config-driven pipeline. `model.py` — authored pure-data cell-complex dataclasses
+  (`Marker`=0-cell, `BoundaryPath`/`ConnectionPath`=1-cell construction, `PathParameterization`/
+  `UACMapping`=1-cell arclength/UAC assignment, `Segment`=2-cell), addressed by key-sequence
+  (`("LIPV","inner","mitral")`) so an anatomy config can be authored in whatever order reads best,
+  independent of build-dependency order (`common.dict_utils.KeySequence`), plus the `EndpointKind`/`PositionKind`
+  enums they use and, in the same module, the computed counterparts (`ParameterizedPath`,
+  `UACPath`, `Submesh`, `UACSubmesh`). `names.py` — generic vocabulary as `StrEnum`/`IntEnum`
+  groups (`PlanarBearing` directions, `OstiumLoop`, `AtrialStructure`,
+  `AnatomicalDirection`, `Axis`, `Winding`) anatomy configs import rather than retyping as string literals — a typo is
+  an `AttributeError` at import time instead of a silently-wrong new dict key. `config_factory.py` —
+  builders for the two patterns most configs need: `pv_config` (a PV-style ostium: concentric
+  marker loops + radial spokes + segments) and `connector_path`/`connector_parameterization`/
+  `straight_connector` (a shortest-path connector between two points, linearly parameterized).
+  `graph.py` — `link()` resolves a config's key-sequence references into a `ConstructionGraph` of
+  live `Node` objects (one `PathNode`/`MarkerNode`/`ParameterizationNode`/`UACMappingNode`/
+  `SegmentNode` per entry, key-sequence fields replaced by direct references to the nodes they
+  name, plus a mutable `result` slot for that node's computed value) — a dangling reference is a
+  `KeyError` here, at link time, not wherever the pipeline first reaches it. Each `Node` type also
+  owns its own `construct*` method: the logic for turning that node's config plus its already-
+  resolved dependencies' results into its own result, plus (for the segmentation-phase types) a
+  `dependencies` property. `geometry.py` — stateless mesh algorithms (boundary/path extraction
+  via igraph, region flood-fill via numba, arclength/UAC parameterization along a path). `UACSubmesh.to_polydata` (in `model.py`) is the one place a
+  `UACSubmesh`'s `(alpha, beta)` + `connectivity` becomes a flat z=0 pyvista mesh — `check.py`,
+  `mapper.py`, and `visualization.py` all build one for area checks or plotting, so it isn't
+  re-derived three separate times). `constructor.py` — also holds the nested-dict type aliases (`MarkerDict`,
+  `UACSubmeshDict`, …) and `UACConstructor`, a thin
+  orchestrator over a linked `ConstructionGraph`: it decides *what order* to do work in
+  (`construct_segmentation` derives its own order with a `networkx` topological sort over each
+  node's `dependencies`, since paths/markers/parameterizations feed each other back and forth, not
+  in fixed phases; `construct_uacs` runs the remaining fixed phases), but never *how* an individual
+  node is computed — that split keeps `UACConstructor` from being both the thing that sequences
+  work and the thing that implements every kind of it. `.data` materializes the graph's results
+  back into nested dicts (`UACData`) on read, since that nested-dict shape is the pipeline's
+  external contract — `check.py`/`visualization.py`/`serialization.py`/notebooks all consume it
+  that way, via `common.dict_utils`. `check.py` — three independent validity checks, each catching
+  a defect the others can't: `check_uac_mesh_validity` (per-submesh fold-overs, via cell area),
+  `check_segment_boundary_multiplicity` (structural, config-only, no mesh needed — every boundary
+  *portion* a `Segment` references should be shared by exactly 1 or 2 segments; grouped by
+  `(path, portion)`, not by path alone, since one ostium loop is several distinct portions, each
+  its own edge), and `check_uac_tiling` (geometric, via `shapely` — no two segments' computed UAC
+  regions should overlap; deliberately doesn't check for gaps, since this anatomy's UAC domain has
+  genuine holes at the PV/MV/LAA openings, so "no gaps" isn't a valid generic invariant here).
+- `common/`: `mvc.py`/`jacobian.py` are the numeric core (mean-value coordinates, per-triangle
+  Jacobians) — keep pyvista-free. `mesh_utils.py` — pyvista/trimesh preprocessing.
+  `dict_utils.py` — treats anatomical-path tuples (`("LIPV","inner","mitral")`) as keys into
+  nested dicts (the pipeline's external data contract, and `mapper.py`'s internal one; the
+  `KeySequence` type lives here); use
+  `nested_dict_keys`/`get_dict_entry`/`set_dict_entry`/`build_nested_dict`, don't hand-roll.
+  `common/` is the base layer: it imports nothing else from `uacpy`.
+- `output/`: `serialization.py` (msgpack) and `visualization.py` (pyvista plots) are pipeline
+  consumers — they import `construction`/`mapper`, so they must not live in `common/`.
+  `logging.py` (`format_key`, `print_with_underline`) is the progress-log helper the pipeline
+  itself calls; it imports only `common`, so `construction` can depend on it without a cycle.
+- `basis.py`/`mapper.py`: cross-patient transfer. `basis.py` builds a per-cell tangent basis from
+  a smooth whole-mesh parameterization; `mapper.py`'s `UACMapper` moves scalar/vector fields
+  between the original mesh, its UAC submeshes, and another patient's, via cached Jacobians. Fiber fields are axial, so transfer them with
+  `interpolate_axial_vectors_to_other_uac_mesh` (doubled-angle resampling, `TransferMethod.NEAREST` or
+  `LINEAR`), never as plain vectors through `interpolate_to_other_uac_mesh`.
+- `anatomies/`: one subpackage per anatomy, each a full `construction`-pipeline config — installed
+  library code, not application data, so it's importable without any `sys.path` hacks.
+  `anatomies/left_atrium_4_pvs/parameterization.py` hardcodes one LA topology (4 PVs + LAA + MV);
+  built from `construction.config_factory`'s builders (e.g. the 4 PVs are 4 `config_factory.pv_config(...)` calls, not
+  ~250 hand-written lines each) plus a handful of genuinely one-off structures (MV, LAA, the 8
+  non-PV `Segment`s) written directly as `model` dataclasses.
+  All anatomy-config identifiers are `StrEnum`/`IntEnum` members from the single
+  `construction/names.py`, split by divider into a generic section and an LA-specific section
+  (`RoofConnector`, `MitralConnector`, `MitralVariant`, `SegmentId`, `MITRAL`); none is a bare
+  string literal typed inline in `parameterization.py`. Anatomy-specific *vocabulary* belongs in
+  that LA-specific section of `names.py` (a new anatomy adds its own section there); a new
+  anatomy is otherwise a new subpackage here, built the same way — never an anatomy-specific
+  *branch of logic* in `construction/`, `mapper.py`, or `common/`.
+- `applications/`: notebooks only — thin orchestration that reads a mesh, builds
+  `UACConstructorSettings` from an `anatomies.<name>` config, and runs the pipeline. No anatomy
+  data belongs here. Notebooks run in order: `preprocess_mesh` → `la_construction` → `la_basis` →
+  `la_mapping`.
+
+## Design
+- Priorities: numerical correctness (no fold-overs, consistent conventions) > reproducibility >
+  clear APIs > performance > convenience.
+- Stateless functions in `geometry.py`/`common/`; only `UACConstructor`/`UACMapper` hold state,
+  and only to cache expensive per-submesh data (boundary loops, Jacobians).
+- Explicit over clever; small functions; no magic numbers in library code (name + cite); per-
+  anatomy constants belong in that anatomy's `uacpy.anatomies.<name>` module. Breaking the public
+  API is fine (no external users yet).
+
+## Code style
+- Ruff's enforced rule set is curated, not `select = ["ALL"]`: `E`/`W` (pycodestyle), `F`
+  (Pyflakes), `I` (isort), `UP` (pyupgrade), `B` (flake8-bugbear), `SIM` (flake8-simplify), and
+  `TID252` with `ban-relative-imports = "all"` (always import `uacpy.x.y`, never `from . import
+  y` or `from .x import y`). Type hints, docstrings, and copyright headers are encouraged (see
+  Docs below) but not lint-enforced — don't add `# noqa` for rule categories that aren't selected,
+  there's nothing to suppress. No `# noqa` without a documented reason for the ones that are.
+- Vectorise over mesh cells/vertices (numpy/einsum); loops only over small structural lists
+  (key-sequence tuples, segmentation-graph nodes), never per-cell data. Descriptive snake_case, no
+  new abbreviations.
+
+## Docs
+- Existing modules are mostly undocumented — this isn't lint-enforced, so it won't surface as a
+  check failure, but add a docstring when you touch a function; no speculative repo-wide
+  docstring pass unless asked.
+- Docstring concepts, not mechanics: array shapes/dtypes, units (mesh coords are patient-space
+  until `mesh_utils.preprocess_mesh`'s `dimension_scaling_factor`), non-obvious invariants (UAC
+  `(alpha, beta)` ranges are anatomy-specific, not `[0, 1]`).
+
+## Testing
+- `pixi run -e test pytest` runs `test/` (config in `pyproject.toml`, coverage config in
+  `.coveragerc`). Pipeline-level tests import `uacpy.anatomies.left_atrium_4_pvs` directly — it's
+  the only real anatomy that exists, so there's no synthetic fixture to exercise instead.
+- `test/test_la_construction.py` is a golden-snapshot regression test: it runs the full
+  `la_construction` pipeline against `data/patient_01/mesh_with_fibers_tags.vtu` and asserts
+  per-segment vertex/cell counts and (alpha, beta) ranges against pinned values, plus all three
+  `check.py` validity checks. A failure means either a real pipeline change (investigate) or a
+  deliberate change to the mesh/config (regenerate the snapshot — never loosen tolerances or edit
+  the reference values just to make it pass). `test_segment_boundary_multiplicity` is the one
+  exception: it's structural, config-only, needs no mesh, and is marked `unit` rather than
+  `integration`/`slow` — it can catch a bad config edit before you even run the pipeline.
+- `test/test_mvc.py`/`test/test_jacobian.py` unit-test the pure numeric core against a small
+  synthetic mesh, not `data/`'s real patient meshes — no fixture needed, since the invariants
+  under test hold for any valid triangulation. Prefer mathematical invariants over implementation
+  details: `test_mvc.py` checks boundary reproduction and, more strongly, that mean value
+  coordinates are generalized barycentric coordinates (solving with the mesh's own planar
+  coordinates as the boundary condition must recover those same coordinates everywhere, since a
+  weighted one-ring average reproducing a vertex's own position is MVC's defining property);
+  `test_jacobian.py` checks that the per-triangle Jacobian recovered from a known affine 2D-to-3D
+  embedding equals that exact affine map, for every triangle regardless of its own shape.
+  `assert_allclose`; seed via `np.random.default_rng(seed)`.
+
+## Numerical code
+- `mvc.py` = Floater's mean value coordinates; `jacobian.py` = per-triangle affine Jacobian via
+  Cramer's rule — cite the method when you touch either.
+- Before changing an algorithm: understand the math, preserve conventions (pyvista's flattened
+  face format, the `(3, 2)` Jacobian layout, `(alpha, beta)` order), check shapes/broadcasting,
+  and don't "fix" unusual-looking math (e.g. hole-filling before parameterization in `basis.py`)
+  without understanding why it's there. Correctness first — this runs offline, per patient, not
+  in a hot loop.

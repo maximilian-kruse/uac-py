@@ -1,3 +1,3 @@
-# ULAC
+# uac-py
 
 :construction: **This repository is under development, and not ready for usage yet** :construction:

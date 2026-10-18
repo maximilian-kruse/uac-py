@@ -205,3 +205,6 @@ cython_debug/
 marimo/_static/
 marimo/_lsp/
 __marimo__/
+
+# hatch-vcs generated version file
+src/uacpy/_version.py
