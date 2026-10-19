@@ -17,6 +17,7 @@ need no special treatment (a copied vector keeps its length and sign). If the tw
 resolution, a source cell is repeated or skipped.
 """
 
+import time
 from dataclasses import dataclass
 from typing import Self
 
@@ -25,6 +26,7 @@ import pyvista as pv
 
 from uacpy.common import dict_utils, jacobian
 from uacpy.construction import model
+from uacpy.output import logging
 
 # ==================================================================================================
 # One array per segment (per-cell values), keyed like `UACData.uac_submesh_data`: scalars of shape
@@ -84,6 +86,7 @@ class UACMapper:
         self,
         original_mesh: pv.PolyData,
         uac_submesh_data: dict_utils.KeySequenceDict[model.UACSubmesh],
+        logger: logging.BaseLogger | None = None,
     ):
         """Cache the Jacobians and flat meshes for one patient's UAC submeshes.
 
@@ -92,12 +95,18 @@ class UACMapper:
                 construct `uac_submesh_data`. Its cell count sets the size of fields mapped back
                 onto it.
             uac_submesh_data: `UACSubmesh` per segment (`UACConstructor.data.uac_submesh_data`).
+            logger: Receives debug messages. Defaults to discarding them.
         """
+        self._logger = logging.resolve_logger(logger)
         self._num_cells = original_mesh.n_cells
-        self._segments = {
-            key: _build_segment_cache(original_mesh.points, submesh)
-            for key, submesh in uac_submesh_data.items()
-        }
+        self._segments = {}
+        for key, submesh in uac_submesh_data.items():
+            start = time.perf_counter()
+            self._segments[key] = _build_segment_cache(original_mesh.points, submesh)
+            self._logger.debug(
+                f"Cached segment {'.'.join(map(str, key))}: {len(submesh.vertex_inds)} vertices, "
+                f"{len(submesh.cell_inds)} cells, {time.perf_counter() - start:.3f} s"
+            )
 
     # ----------------------------------------------------------------------------------------------
     def map_scalar_from_original_to_uac_mesh(self, scalar_field: np.ndarray) -> FieldDict:
@@ -109,6 +118,7 @@ class UACMapper:
         Returns:
             Dict with one array of shape `(n_segment_cells,)` per segment.
         """
+        self._logger.debug(f"Gathering scalar field of shape {scalar_field.shape} onto segments")
         return {key: scalar_field[segment.cell_inds] for key, segment in self._segments.items()}
 
     # ----------------------------------------------------------------------------------------------
@@ -136,6 +146,7 @@ class UACMapper:
         Returns:
             Dict with one array of shape `(n_segment_cells, 2)` per segment.
         """
+        self._logger.debug(f"Gathering vector field of shape {vector_field.shape} onto segments")
         return {
             key: np.einsum("ijk,ik->ij", segment.pinv_jacobians, vector_field[segment.cell_inds])
             for key, segment in self._segments.items()
@@ -203,6 +214,11 @@ class UACMapper:
         for key, segment in self._segments.items():
             centroids = other_uac_mapper._segments[key].flat_mesh.cell_centers().points
             nearest_cells = segment.flat_mesh.find_closest_cell(centroids)
+            self._logger.debug(
+                f"Transfer {'.'.join(map(str, key))}: {len(centroids)} target cells from "
+                f"{segment.flat_mesh.n_cells} source cells, "
+                f"{np.unique(nearest_cells).size} distinct source cells used"
+            )
             transferred[key] = uac_data[key][nearest_cells]
         return transferred
 
@@ -210,6 +226,14 @@ class UACMapper:
     def _scatter(self, per_segment_data: FieldDict, trailing_shape: tuple[int, ...]) -> np.ndarray:
         """Write each segment's per-cell values to its cells in an original-mesh array of zeros."""
         original_mesh_data = np.zeros((self._num_cells, *trailing_shape))
+        covered = np.zeros(self._num_cells, dtype=bool)
+        num_non_finite = 0
         for key, segment in self._segments.items():
             original_mesh_data[segment.cell_inds] = per_segment_data[key]
+            covered[segment.cell_inds] = True
+            num_non_finite += np.count_nonzero(~np.isfinite(per_segment_data[key]))
+        self._logger.debug(
+            f"Scattered {len(self._segments)} segments onto {self._num_cells} cells: "
+            f"{np.count_nonzero(~covered)} cells uncovered, {num_non_finite} non-finite values"
+        )
         return original_mesh_data

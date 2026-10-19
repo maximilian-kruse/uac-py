@@ -1,5 +1,7 @@
 """`UACConstructor`, the thin orchestrator that runs a linked `graph.ConstructionGraph`."""
 
+import time
+from collections.abc import Callable
 from dataclasses import dataclass
 
 import networkx as nx
@@ -9,6 +11,11 @@ import pyvista as pv
 from uacpy.common import dict_utils
 from uacpy.construction import graph, model
 from uacpy.output import logging
+
+# ==================================================================================================
+_STEP_COLUMNS = ("Step", "Kind", "Key", "Time [s]")
+_STEP_ALIGNMENTS = "><<>"
+_TABLE_RULE_CHARACTER = "-"
 
 
 # ==================================================================================================
@@ -27,6 +34,8 @@ class UACConstructorSettings:
         parameterization_config: Nested dict of `PathParameterization`.
         uac_config: Nested dict of `UACMapping`.
         submesh_config: Nested dict of `Segment`.
+        logger: Receives the progress log. The caller owns it and closes it. If `None`, a
+            console-only logger is created.
 
     The config dicts are nested as authored; `graph.link` flattens them.
     """
@@ -38,6 +47,7 @@ class UACConstructorSettings:
     parameterization_config: dict
     uac_config: dict
     submesh_config: dict
+    logger: logging.BaseLogger | None = None
 
 
 @dataclass
@@ -91,12 +101,20 @@ class UACConstructor:
         """
         self._mesh = settings.mesh
         self._feature_tags = settings.feature_tags
+        self._logger = logging.resolve_logger(settings.logger, print_to_console=True)
         self._graph = graph.link(
             path_config=settings.path_config,
             marker_config=settings.marker_config,
             parameterization_config=settings.parameterization_config,
             uac_config=settings.uac_config,
             submesh_config=settings.submesh_config,
+        )
+        self._logger.debug(
+            f"Linked construction graph: {len(self._graph.paths)} paths, "
+            f"{len(self._graph.markers)} markers, {len(self._graph.parameterizations)} "
+            f"parameterizations, {len(self._graph.uacs)} UAC mappings, "
+            f"{len(self._graph.segments)} segments; mesh with {self._mesh.n_points} vertices and "
+            f"{self._mesh.n_cells} cells; feature tags {self._feature_tags}"
         )
 
     # ----------------------------------------------------------------------------------------------
@@ -112,9 +130,6 @@ class UACConstructor:
         Raises:
             ValueError: If the config's dependencies are circular.
         """
-        print("Starting Segmentation")
-        print("=====================\n\n")
-
         dependency_graph = self._build_segmentation_graph()
         try:
             order = list(nx.topological_sort(dependency_graph))
@@ -122,17 +137,90 @@ class UACConstructor:
             cycle = nx.find_cycle(dependency_graph)
             raise ValueError(f"Segmentation config has a circular dependency: {cycle}") from e
 
-        for i, node in enumerate(order):
-            step_key = logging.format_key(node.key)
-            logging.print_with_underline(f"Step {i + 1}/{len(order)}: {step_key}")
-            match node:
-                case graph.PathNode():
-                    node.construct(self._mesh, self._feature_tags)
-                case graph.MarkerNode():
-                    node.construct()
-                case graph.ParameterizationNode():
-                    node.construct(self._mesh)
-            print(" ")
+        for i, node in enumerate(order, start=1):
+            self._logger.debug(
+                f"Order {i}: {logging.format_key(node.key)} depends on "
+                f"{len(node.dependencies)} node(s)"
+            )
+        steps = [
+            (
+                self._segmentation_kind(node),
+                logging.format_key(node.key),
+                lambda node=node: self._construct_segmentation_node(node),
+            )
+            for node in order
+        ]
+        self._run_section("Segmentation", steps)
+
+    # ----------------------------------------------------------------------------------------------
+    @staticmethod
+    def _segmentation_kind(
+        node: graph.PathNode | graph.MarkerNode | graph.ParameterizationNode,
+    ) -> str:
+        """Short label of what a segmentation node builds, for the progress table."""
+        match node:
+            case graph.PathNode(config=model.BoundaryPath()):
+                return "feature"
+            case graph.PathNode():
+                return "shortest path"
+            case graph.MarkerNode():
+                return "marker"
+            case graph.ParameterizationNode():
+                return "parameterization"
+
+    # ----------------------------------------------------------------------------------------------
+    def _construct_segmentation_node(
+        self, node: graph.PathNode | graph.MarkerNode | graph.ParameterizationNode
+    ) -> None:
+        """Construct one path, marker, or parameterization node."""
+        match node:
+            case graph.PathNode():
+                node.construct(self._mesh, self._feature_tags, self._logger)
+            case graph.MarkerNode():
+                node.construct(self._logger)
+            case graph.ParameterizationNode():
+                node.construct(self._mesh, self._logger)
+
+    # ----------------------------------------------------------------------------------------------
+    def _run_section(self, title: str, steps: list[tuple[str, str, Callable[[], None]]]) -> None:
+        """Run the steps of one pipeline section, logging a divider and a timed table of steps.
+
+        Args:
+            title: Name of the section.
+            steps: One `(kind, key, action)` per step: a short label of what is built, the
+                formatted key of the entry it is built for, and the call that builds it.
+        """
+        step_labels = [f"{i}/{len(steps)}" for i in range(1, len(steps) + 1)]
+        columns = [step_labels, [kind for kind, _, _ in steps], [key for _, key, _ in steps]]
+        widths = [
+            max([len(header), *(len(cell) for cell in column)])
+            for header, column in zip(_STEP_COLUMNS, columns, strict=False)
+        ]
+        widths.append(len(_STEP_COLUMNS[-1]))
+        rule = logging.format_table_row(
+            [_TABLE_RULE_CHARACTER * width for width in widths], widths, _STEP_ALIGNMENTS
+        )
+
+        self._logger.section(title)
+        self._logger.debug(f"Section '{title}' started with {len(steps)} steps")
+        self._logger.info(logging.format_table_row(_STEP_COLUMNS, widths, _STEP_ALIGNMENTS))
+        self._logger.info(rule)
+        section_start = time.perf_counter()
+        step_durations = []
+        for label, (kind, key, action) in zip(step_labels, steps, strict=True):
+            step_start = time.perf_counter()
+            action()
+            step_durations.append(time.perf_counter() - step_start)
+            row = (label, kind, key, f"{step_durations[-1]:.3f}")
+            self._logger.info(logging.format_table_row(row, widths, _STEP_ALIGNMENTS))
+        self._logger.info(rule)
+        self._logger.info(f"{len(steps)} steps in {time.perf_counter() - section_start:.2f} s")
+        if steps:
+            slowest = int(np.argmax(step_durations))
+            self._logger.debug(
+                f"Section '{title}' slowest step: {steps[slowest][1]} "
+                f"({step_durations[slowest]:.3f} s)"
+            )
 
     # ----------------------------------------------------------------------------------------------
     def _build_segmentation_graph(self) -> nx.DiGraph:
@@ -162,22 +250,48 @@ class UACConstructor:
         Raises:
             RuntimeError: If a node's dependency has not been constructed yet.
         """
-        logging.print_with_underline("Construct UAC Paths")
-        for node in self._graph.uacs.values():
-            node.construct()
-        print(" ")
-        logging.print_with_underline("Extract Submesh Boundaries")
-        for node in self._graph.segments.values():
-            node.construct_boundary()
-        print(" ")
-        logging.print_with_underline("Extract Submeshes")
-        for node in self._graph.segments.values():
-            node.construct_submesh(self._mesh)
-        print(" ")
-        logging.print_with_underline("Compute UACs on Submeshes")
-        for node in self._graph.segments.values():
-            node.construct_uacs(self._mesh)
-        print(" ")
+        uac_nodes = list(self._graph.uacs.values())
+        segment_nodes = list(self._graph.segments.values())
+        self._run_section(
+            "UAC paths",
+            [
+                ("uac path", logging.format_key(n.key), lambda n=n: n.construct(self._logger))
+                for n in uac_nodes
+            ],
+        )
+        self._run_section(
+            "Submesh boundaries",
+            [
+                (
+                    "boundary",
+                    logging.format_key(n.key),
+                    lambda n=n: n.construct_boundary(self._logger),
+                )
+                for n in segment_nodes
+            ],
+        )
+        self._run_section(
+            "Submeshes",
+            [
+                (
+                    "submesh",
+                    logging.format_key(n.key),
+                    lambda n=n: n.construct_submesh(self._mesh, self._logger),
+                )
+                for n in segment_nodes
+            ],
+        )
+        self._run_section(
+            "UACs on submeshes",
+            [
+                (
+                    "mvc",
+                    logging.format_key(n.key),
+                    lambda n=n: n.construct_uacs(self._mesh, self._logger),
+                )
+                for n in segment_nodes
+            ],
+        )
 
     # ----------------------------------------------------------------------------------------------
     @property

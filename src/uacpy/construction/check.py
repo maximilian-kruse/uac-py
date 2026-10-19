@@ -19,7 +19,10 @@ _TILING_AREA_TOLERANCE = 1e-9
 
 
 # ==================================================================================================
-def check_uac_mesh_validity(uac_submesh: dict_utils.KeySequenceDict[model.UACSubmesh]) -> bool:
+def check_uac_mesh_validity(
+    uac_submesh: dict_utils.KeySequenceDict[model.UACSubmesh],
+    logger: logging.BaseLogger | None = None,
+) -> bool:
     """No submesh should fold over itself in UAC space (a cell with non-positive area).
 
     A fold-over means the mean-value-coordinate map placed two or more original-mesh cells on top
@@ -28,24 +31,31 @@ def check_uac_mesh_validity(uac_submesh: dict_utils.KeySequenceDict[model.UACSub
 
     Args:
         uac_submesh: `UACSubmesh` per segment (`UACData.uac_submesh_data`).
+        logger: Receives a warning per defect. Defaults to a console-only logger.
 
     Returns:
-        `True` if every cell of every submesh has positive area. Otherwise prints the first
+        `True` if every cell of every submesh has positive area. Otherwise logs the first
         offending submesh and returns `False`.
     """
+    logger = logging.resolve_logger(logger, print_to_console=True)
     for key, submesh_data in uac_submesh.items():
         pv_submesh = submesh_data.to_polydata()
         quality_data = pv_submesh.cell_quality(quality_measure="area")
         cell_areas = quality_data.cell_data["area"]
+        logger.debug(
+            f"Mesh validity {logging.format_key(key)}: {cell_areas.size} cells, "
+            f"minimum area {cell_areas.min():.3e}"
+        )
 
         if np.any(cell_areas <= 0):
             formatted_key = logging.format_key(key)
-            print(
+            logger.warning(
                 f"Foldover detected in submesh {formatted_key}: found "
                 f"{np.sum(cell_areas <= 0)} cells with non-positive area."
             )
             return False
 
+    logger.info(f"Check passed: no fold-overs in {len(uac_submesh)} submeshes.")
     return True
 
 
@@ -56,6 +66,7 @@ def check_segment_boundary_multiplicity(
     parameterization_config: dict,
     uac_config: dict,
     submesh_config: dict,
+    logger: logging.BaseLogger | None = None,
 ) -> bool:
     """Every Segment-boundary portion should be used by 1 (mesh edge) or 2 (shared) segments.
 
@@ -73,9 +84,10 @@ def check_segment_boundary_multiplicity(
         parameterization_config: Nested dict of path parameterization configs.
         uac_config: Nested dict of UAC mapping configs.
         submesh_config: Nested dict of segment configs.
+        logger: Receives a warning per offending portion. Defaults to a console-only logger.
 
     Returns:
-        `True` if every boundary portion is referenced by one or two segments. Otherwise prints
+        `True` if every boundary portion is referenced by one or two segments. Otherwise logs
         each offending portion and returns `False`.
 
     Raises:
@@ -96,22 +108,32 @@ def check_segment_boundary_multiplicity(
             key = (uac_node.key, rounded_portion)
             segments_by_boundary_portion.setdefault(key, []).append(segment.key)
 
+    logger = logging.resolve_logger(logger, print_to_console=True)
+    logger.debug(
+        f"Boundary multiplicity: {len(segments_by_boundary_portion)} boundary portions "
+        f"across {len(construction_graph.segments)} segments"
+    )
     is_valid = True
     for (boundary_key, portion), segment_keys in segments_by_boundary_portion.items():
         if len(segment_keys) not in (1, 2):
             formatted_segment_keys = [logging.format_key(key) for key in segment_keys]
-            print(
+            logger.warning(
                 f"Boundary {logging.format_key(boundary_key)} portion {portion} is "
                 f"referenced by {len(segment_keys)} segments {formatted_segment_keys} "
                 "-- expected 1 or 2."
             )
             is_valid = False
 
+    if is_valid:
+        logger.info("Check passed: every boundary portion is used by one or two segments.")
     return is_valid
 
 
 # ==================================================================================================
-def check_uac_tiling(submesh_boundary_data: dict_utils.KeySequenceDict[model.UACPath]) -> bool:
+def check_uac_tiling(
+    submesh_boundary_data: dict_utils.KeySequenceDict[model.UACPath],
+    logger: logging.BaseLogger | None = None,
+) -> bool:
     """No two segments should overlap in UAC space.
 
     Builds one polygon per segment from its already-computed, ordered boundary loop
@@ -128,9 +150,10 @@ def check_uac_tiling(submesh_boundary_data: dict_utils.KeySequenceDict[model.UAC
     Args:
         submesh_boundary_data: Ordered, UAC-mapped boundary loop per segment
             (`UACData.submesh_boundary_data`).
+        logger: Receives a warning per overlapping pair. Defaults to a console-only logger.
 
     Returns:
-        `True` if no two segments overlap by more than a small area tolerance. Otherwise prints
+        `True` if no two segments overlap by more than a small area tolerance. Otherwise logs
         each overlapping pair and returns `False`.
     """
     polygons = {
@@ -138,18 +161,25 @@ def check_uac_tiling(submesh_boundary_data: dict_utils.KeySequenceDict[model.UAC
         for key, boundary in submesh_boundary_data.items()
     }
 
+    logger = logging.resolve_logger(logger, print_to_console=True)
     is_valid = True
     polygon_keys = list(polygons)
+    logger.debug(
+        f"Tiling: {len(polygon_keys)} polygons, {len(polygon_keys) * (len(polygon_keys) - 1) // 2} "
+        "pairs to compare"
+    )
     for i, key_a in enumerate(polygon_keys):
         for key_b in polygon_keys[i + 1 :]:
             overlap_area = polygons[key_a].intersection(polygons[key_b]).area
             if overlap_area > _TILING_AREA_TOLERANCE:
                 formatted_key_a = logging.format_key(key_a)
                 formatted_key_b = logging.format_key(key_b)
-                print(
+                logger.warning(
                     f"Segments {formatted_key_a} and {formatted_key_b} overlap in UAC space "
                     f"(area={overlap_area:.2e})."
                 )
                 is_valid = False
 
+    if is_valid:
+        logger.info(f"Check passed: no overlap among {len(polygon_keys)} segments in UAC space.")
     return is_valid

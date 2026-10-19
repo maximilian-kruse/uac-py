@@ -14,12 +14,16 @@ from numba import njit
 from numba.typed import List
 
 from uacpy.construction.model import ParameterizedPath, Submesh, UACPath
+from uacpy.output import logging
 
 
 # ==================================================================================================
 def get_feature_boundary(
-    mesh: pv.PolyData, feature_tag: int, coincides_with_geometry_boundary: bool
-) -> tuple[np.ndarray, np.ndarray]:
+    mesh: pv.PolyData,
+    feature_tag: int,
+    coincides_with_geometry_boundary: bool,
+    logger: logging.BaseLogger | None = None,
+) -> np.ndarray:
     """Extract the ordered vertex loop bounding the region tagged `feature_tag`.
 
     A tagged region's own boundary edges include both its "true" anatomical boundary (e.g. a PV
@@ -34,11 +38,13 @@ def get_feature_boundary(
         feature_tag: Value in `anatomical_tags` identifying the region.
         coincides_with_geometry_boundary: Whether to keep the part of the region's boundary lying
             on the mesh's own boundary (`True`) or only the part in the mesh interior (`False`).
+        logger: Receives debug messages. Defaults to discarding them.
 
     Returns:
         Vertex indices into `mesh` of the selected boundary vertices, ordered along the loop,
         shape `(n,)`.
     """
+    logger = logging.resolve_logger(logger)
     feature_mesh = mesh.extract_values(feature_tag, scalars="anatomical_tags")
     feature_boundaries = feature_mesh.extract_feature_edges(
         boundary_edges=True,
@@ -55,30 +61,44 @@ def get_feature_boundary(
     feature_boundary_inds = feature_boundaries.point_data["vtkOriginalPointIds"]
     geometry_boundary_inds = geometry_boundaries.point_data["vtkOriginalPointIds"]
 
+    logger.debug(
+        f"  tag {feature_tag}: {feature_mesh.n_cells} cells, {feature_boundary_inds.size} "
+        f"boundary vertices, {geometry_boundary_inds.size} mesh-boundary vertices"
+    )
     if coincides_with_geometry_boundary:
         feature_boundary_inds = np.intersect1d(feature_boundary_inds, geometry_boundary_inds)
     else:
         feature_boundary_inds = np.setdiff1d(feature_boundary_inds, geometry_boundary_inds)
 
-    ordered_boundary_inds = _construct_ordered_path_from_indices(mesh, feature_boundary_inds)
+    ordered_boundary_inds = _construct_ordered_path_from_indices(
+        mesh, feature_boundary_inds, logger
+    )
     return ordered_boundary_inds
 
 
 # --------------------------------------------------------------------------------------------------
-def _construct_ordered_path_from_indices(mesh: pv.PolyData, path_indices: np.ndarray) -> np.ndarray:
+def _construct_ordered_path_from_indices(
+    mesh: pv.PolyData, path_indices: np.ndarray, logger: logging.BaseLogger
+) -> np.ndarray:
     """Reorder an unordered set of boundary-loop vertex indices into travel order along the loop.
 
     `path_indices` is a set, not a sequence -- pyvista's boundary extraction gives no ordering.
     Restricting the mesh's edges to those with both endpoints in `path_indices` leaves exactly the
     loop's own edges, so a DFS from an arbitrary start vertex over that edge-induced subgraph
     visits every vertex exactly once, in loop order (a boundary loop is a simple cycle, so DFS from
-    any vertex traces it without backtracking).
+    any vertex traces it without backtracking). If the selection is not one single loop, the DFS
+    silently covers only the component containing the first vertex, so the component count is
+    logged.
     """
     tm_mesh = tm.Trimesh(mesh.points, mesh.faces.reshape(-1, 4)[:, 1:])
     path_edges = tm_mesh.edges[np.isin(tm_mesh.edges, path_indices).all(axis=1)].flatten()
     local_edges = np.array([np.where(path_indices == ind)[0][0] for ind in path_edges])
     local_edges = local_edges.reshape(-1, 2)
     graph = ig.Graph(local_edges, directed=False)
+    logger.debug(
+        f"  {path_indices.size} selected vertices form {len(graph.connected_components())} "
+        "connected component(s)"
+    )
     ordered_path, _ = graph.dfs(0)
     return path_indices[ordered_path]
 
@@ -90,6 +110,7 @@ def construct_shortest_path_between_subsets(
     subset_two: np.ndarray,
     inadmissible_contact_set: np.ndarray,
     inadmissible_along_set: np.ndarray,
+    logger: logging.BaseLogger | None = None,
 ) -> np.ndarray:
     """Find the shortest edge-path between any vertex of `subset_one` and any of `subset_two`.
 
@@ -109,11 +130,13 @@ def construct_shortest_path_between_subsets(
         inadmissible_contact_set: Vertex indices the path may not touch. May be empty.
         inadmissible_along_set: Vertex indices the path may touch but not travel along. May be
             empty.
+        logger: Receives debug messages. Defaults to discarding them.
 
     Returns:
         Vertex indices of the path from a `subset_one` vertex to a `subset_two` vertex, shape
         `(k,)`.
     """
+    logger = logging.resolve_logger(logger)
     tm_mesh = tm.Trimesh(vertices=mesh.points, faces=mesh.faces.reshape(-1, 4)[:, 1:])
     edges = tm_mesh.edges_unique
     edge_lengths = tm_mesh.edges_unique_length
@@ -128,6 +151,11 @@ def construct_shortest_path_between_subsets(
     graph = ig.Graph(admissible_edges, directed=False)
     distances = np.array(graph.distances(subset_one, subset_two, weights=admissible_edges_lengths))
     rel_start_point, rel_end_point = np.unravel_index(np.argmin(distances), distances.shape)
+    logger.debug(
+        f"  {inadmissible_edges.size} of {edges.shape[0]} edges removed; closest pair "
+        f"{subset_one[rel_start_point]} -> {subset_two[rel_end_point]}, "
+        f"distance {distances[rel_start_point, rel_end_point]:.4g}"
+    )
     graph = ig.Graph(admissible_edges, directed=False)
     shortest_path = np.array(
         graph.get_shortest_paths(
@@ -141,7 +169,10 @@ def construct_shortest_path_between_subsets(
 
 # --------------------------------------------------------------------------------------------------
 def extract_region_from_boundary(
-    mesh: pv.PolyData, boundary_inds: np.ndarray, outside_inds: np.ndarray
+    mesh: pv.PolyData,
+    boundary_inds: np.ndarray,
+    outside_inds: np.ndarray,
+    logger: logging.BaseLogger | None = None,
 ) -> Submesh:
     """Extract the cells enclosed by a boundary loop, on the side away from `outside_inds`.
 
@@ -158,10 +189,12 @@ def extract_region_from_boundary(
         mesh: Triangle surface mesh.
         boundary_inds: Ordered vertex indices of the closed boundary loop, shape `(n,)`.
         outside_inds: Vertex indices known to lie outside the loop. Only the first is used.
+        logger: Receives debug messages. Defaults to discarding them.
 
     Returns:
         The enclosed region as a `Submesh`; the boundary loop's own cells are included.
     """
+    logger = logging.resolve_logger(logger)
     mesh_points_without_boundary = np.setdiff1d(np.arange(mesh.number_of_points), boundary_inds)
     mesh_without_boundary = mesh.extract_points(mesh_points_without_boundary, adjacent_cells=False)
     # `vtkOriginalPointIds` is a VTK-reserved name that `connectivity`/`split_bodies` overwrite
@@ -174,6 +207,10 @@ def extract_region_from_boundary(
         submeshes[0].point_data["original_point_ids"] == outside_inds[0]
     )[0]
     inside_mesh = submeshes[0] if coinciding_outside_inds.size == 0 else submeshes[1]
+    logger.debug(
+        f"  boundary cut splits the mesh into {len(submeshes)} bodies; inside body has "
+        f"{inside_mesh.n_points} vertices"
+    )
     seed_point = inside_mesh.point_data["original_point_ids"][0]
     seed_ind = np.where(np.isin(mesh.faces.reshape(-1, 4)[:, 1:4], seed_point).any(axis=1))[0][0]
 

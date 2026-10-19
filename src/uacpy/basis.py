@@ -19,11 +19,15 @@ import numpy as np
 import pyvista as pv
 
 from uacpy.common import jacobian, mvc
+from uacpy.output import logging
 
 
 # ==================================================================================================
 def construct_cellwise_basis(
-    mesh: pv.PolyData, exterior_boundary_tag: int, exterior_boundary_radius: float
+    mesh: pv.PolyData,
+    exterior_boundary_tag: int,
+    exterior_boundary_radius: float,
+    logger: logging.BaseLogger | None = None,
 ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     """Construct an orthonormal 3D tangent-plane basis for every cell of `mesh`.
 
@@ -38,6 +42,7 @@ def construct_cellwise_basis(
             boundary region.
         exterior_boundary_radius: Radius of the circle the exterior boundary is mapped to, in
             parameterization units.
+        logger: Receives debug messages. Defaults to discarding them.
 
     Returns:
         A tuple `(basis_vectors, mvc_coordinates, cellwise_jacobians)`:
@@ -48,20 +53,29 @@ def construct_cellwise_basis(
         - `cellwise_jacobians`: shape `(n_cells, 3, 2)`, the raw, pre-orthonormalization Jacobian
           each basis was derived from.
     """
+    logger = logging.resolve_logger(logger)
     simplices = np.array(mesh.faces.reshape(-1, 4)[:, 1:4])
     mvc_coordinates = _construct_smooth_parameterization(
-        mesh, exterior_boundary_tag, exterior_boundary_radius
+        mesh, exterior_boundary_tag, exterior_boundary_radius, logger
     )
     cellwise_jacobians = jacobian.compute_cellwise_jacobians(
         vertices_3d=mesh.points, vertices_2d=mvc_coordinates, simplices=simplices
     )
     basis_vectors = _orthonormalize_jacobian_columns(cellwise_jacobians)
+    num_degenerate_cells = np.count_nonzero(~np.isfinite(basis_vectors).all(axis=(1, 2)))
+    logger.debug(
+        f"Basis for {len(simplices)} cells; {num_degenerate_cells} with non-finite basis vectors "
+        "(degenerate Jacobian)"
+    )
     return basis_vectors, mvc_coordinates, cellwise_jacobians
 
 
 # --------------------------------------------------------------------------------------------------
 def _construct_smooth_parameterization(
-    mesh: pv.PolyData, exterior_boundary_tag: int, exterior_boundary_radius: float
+    mesh: pv.PolyData,
+    exterior_boundary_tag: int,
+    exterior_boundary_radius: float,
+    logger: logging.BaseLogger,
 ) -> np.ndarray:
     """A whole-mesh mean value parameterization onto a disk, exterior loop mapped to a circle.
 
@@ -74,9 +88,9 @@ def _construct_smooth_parameterization(
     """
     vertices = np.array(mesh.points)
     simplices = np.array(mesh.faces.reshape(-1, 4)[:, 1:4])
-    exterior_loop = _find_exterior_boundary(mesh, exterior_boundary_tag)
+    exterior_loop = _find_exterior_boundary(mesh, exterior_boundary_tag, logger)
     extended_vertices, extended_simplices = _create_mesh_with_holes_filled(
-        simplices, vertices, exterior_loop
+        simplices, vertices, exterior_loop, logger
     )
     boundary_x_coords, boundary_y_coords = _map_path_to_circle(
         radius=exterior_boundary_radius, path=exterior_loop
@@ -90,7 +104,9 @@ def _construct_smooth_parameterization(
 
 
 # --------------------------------------------------------------------------------------------------
-def _find_exterior_boundary(mesh: pv.PolyData, exterior_boundary_tag: int) -> np.ndarray:
+def _find_exterior_boundary(
+    mesh: pv.PolyData, exterior_boundary_tag: int, logger: logging.BaseLogger
+) -> np.ndarray:
     """Find which of `mesh`'s boundary loops (MV plus one per PV) is the exterior (MV) one.
 
     Asserts there is exactly one: more than one loop touching `exterior_boundary_tag`'s vertices
@@ -109,6 +125,10 @@ def _find_exterior_boundary(mesh: pv.PolyData, exterior_boundary_tag: int) -> np
             exterior_loop = boundary_loop
         else:
             interior_loops.append(boundary_loop)
+    logger.debug(
+        f"Found {len(boundary_loops)} boundary loops: {len(interior_loops)} interior, exterior "
+        f"loop of {0 if exterior_loop is None else len(exterior_loop)} vertices"
+    )
     assert exterior_loop is not None, "No exterior loop found in the mesh."
     assert len(interior_loops) + 1 == len(boundary_loops), (
         "More than one exterior loop found in the mesh."
@@ -118,7 +138,10 @@ def _find_exterior_boundary(mesh: pv.PolyData, exterior_boundary_tag: int) -> np
 
 # --------------------------------------------------------------------------------------------------
 def _create_mesh_with_holes_filled(
-    simplices: np.ndarray, vertices: np.ndarray, exterior_boundary_inds: np.ndarray
+    simplices: np.ndarray,
+    vertices: np.ndarray,
+    exterior_boundary_inds: np.ndarray,
+    logger: logging.BaseLogger,
 ) -> tuple[np.ndarray, np.ndarray]:
     """Temporarily fill every boundary loop of a mesh *except* the exterior (MV) one, via `meshlib`.
 
@@ -139,6 +162,10 @@ def _create_mesh_with_holes_filled(
         mrmeshpy.fillHole(meshlib_mesh, edge_id, params)
     extended_vertices = mrmeshnumpy.getNumpyVerts(meshlib_mesh)
     extended_simplices = mrmeshnumpy.getNumpyFaces(meshlib_mesh.topology)
+    logger.debug(
+        f"Filled {len(hole_edges)} holes: added {len(extended_vertices) - len(vertices)} "
+        f"vertices and {len(extended_simplices) - len(simplices)} triangles"
+    )
     return extended_vertices, extended_simplices
 
 

@@ -19,6 +19,7 @@ implements every kind of work, for five different node types -- a god class.
 
 from __future__ import annotations
 
+import time
 from dataclasses import dataclass, field
 from typing import TYPE_CHECKING
 
@@ -68,30 +69,43 @@ class PathNode:
         dependencies.extend(self.inadmissible_along)
         return dependencies
 
-    def construct(self, mesh: pv.PolyData, feature_tags: dict[str, int]) -> None:
+    def construct(
+        self, mesh: pv.PolyData, feature_tags: dict[str, int], logger: logging.BaseLogger
+    ) -> None:
         """Extract a `BoundaryPath` by feature tag, or a `ConnectionPath` as a shortest path.
 
         Args:
             mesh: Triangle surface mesh with `anatomical_tags` cell data.
             feature_tags: Map from tag names to the integer values in `anatomical_tags`.
+            logger: Receives debug messages.
 
         Raises:
             RuntimeError: If a dependency has not been constructed yet.
             ValueError: If a connection's boundary type is unknown.
         """
         if isinstance(self.config, model.BoundaryPath):
-            print(f"Extracting Feature: {logging.format_key(self.key)}")
             tag_value = feature_tags[self.config.feature_tag]
             is_mesh_boundary = self.config.coincides_with_mesh_boundary
-            self.result = geometry.get_feature_boundary(mesh, tag_value, is_mesh_boundary)
+            logger.debug(
+                f"{logging.format_key(self.key)}: feature '{self.config.feature_tag}' = tag "
+                f"{tag_value}, coincides_with_mesh_boundary={is_mesh_boundary}"
+            )
+            self.result = geometry.get_feature_boundary(mesh, tag_value, is_mesh_boundary, logger)
+            logger.debug(f"  -> boundary of {len(self.result)} vertices")
             return
 
-        print(f"Constructing Shortest Path: {logging.format_key(self.key)}")
         boundaries = self._resolve_connection_boundaries()
         inadmissible_sets = self._resolve_inadmissible_sets()
-        self.result = geometry.construct_shortest_path_between_subsets(
-            mesh, *boundaries, *inadmissible_sets
+        logger.debug(
+            f"{logging.format_key(self.key)}: shortest path between sets of "
+            f"{len(boundaries[0])} and {len(boundaries[1])} vertices, inadmissible "
+            f"contact/along sets of {len(inadmissible_sets[0])}/{len(inadmissible_sets[1])} "
+            "vertices"
         )
+        self.result = geometry.construct_shortest_path_between_subsets(
+            mesh, *boundaries, *inadmissible_sets, logger=logger
+        )
+        logger.debug(f"  -> path of {len(self.result)} vertices")
 
     def _resolve_connection_boundaries(self) -> list[np.ndarray]:
         """Resolve `start` and `end` to vertex-index sets (a raw path or a single marker)."""
@@ -148,11 +162,14 @@ class MarkerNode:
         """
         return [self.source] if self.source is not None else []
 
-    def construct(self) -> None:
+    def construct(self, logger: logging.BaseLogger) -> None:
         """Resolve a `Marker` to a vertex index, by raw-path index or relative arclength.
 
         For relative positions, the first path vertex at or beyond the prescribed relative length
         is chosen.
+
+        Args:
+            logger: Receives debug messages.
 
         Raises:
             RuntimeError: If the source has not been constructed yet.
@@ -160,10 +177,13 @@ class MarkerNode:
             ValueError: If a relative position is not on the path, or the position type is
                 unknown.
         """
-        print(f"Extracting Marker: {logging.format_key(self.key)}")
 
         if self.config.position_type == PositionKind.INDEX:
             containing_path = _require(self.source, self)
+            logger.debug(
+                f"{logging.format_key(self.key)}: index {self.config.position} on "
+                f"{logging.format_key(self.source.key)} ({len(containing_path)} vertices)"
+            )
             try:
                 marker_ind = containing_path[self.config.position]
             except IndexError as e:
@@ -175,6 +195,10 @@ class MarkerNode:
 
         elif self.config.position_type == PositionKind.RELATIVE:
             containing_path = _require(self.source, self)
+            logger.debug(
+                f"{logging.format_key(self.key)}: relative length {self.config.position} on "
+                f"{logging.format_key(self.source.key)} ({len(containing_path.inds)} vertices)"
+            )
             try:
                 relative_marker_ind = np.where(
                     containing_path.relative_lengths >= self.config.position
@@ -192,6 +216,7 @@ class MarkerNode:
             )
 
         self.result = int(marker_ind)
+        logger.debug(f"  -> vertex {self.result}")
 
 
 # ==================================================================================================
@@ -225,20 +250,26 @@ class ParameterizationNode:
             dependencies.insert(0, self.path)
         return dependencies
 
-    def construct(self, mesh: pv.PolyData) -> None:
+    def construct(self, mesh: pv.PolyData, logger: logging.BaseLogger) -> None:
         """Arclength-parameterize a raw path between its markers.
 
         Args:
             mesh: Triangle surface mesh providing vertex positions.
+            logger: Receives debug messages.
 
         Raises:
             RuntimeError: If the path or a marker has not been constructed yet.
         """
-        print(f"Parameterizing Path: {logging.format_key(self.key)}")
         path = _require(self.path, self)
         marker_inds = [_require(marker_node, self) for marker_node in self.markers]
         self.result = geometry.parameterize_path(
             mesh, path, marker_inds, self.config.marker_relative_positions
+        )
+        arclength = np.linalg.norm(np.diff(mesh.points[self.result.inds], axis=0), axis=1).sum()
+        logger.debug(
+            f"{logging.format_key(self.key)}: {len(self.result.inds)} vertices, arclength "
+            f"{arclength:.4g}, markers {marker_inds} at relative lengths "
+            f"{list(self.config.marker_relative_positions)}"
         )
 
 
@@ -259,16 +290,23 @@ class UACMappingNode:
     parameterization: ParameterizationNode | None = None
     result: model.UACPath | None = None
 
-    def construct(self) -> None:
+    def construct(self, logger: logging.BaseLogger) -> None:
         """Assign target (alpha, beta) coordinates along the parameterization's arclength.
+
+        Args:
+            logger: Receives debug messages.
 
         Raises:
             RuntimeError: If the parameterization has not been constructed yet.
         """
-        print(f"Constructing UACs for Path: {logging.format_key(self.key)}")
         parameterized_path = _require(self.parameterization, self)
         self.result = geometry.compute_uacs_polyline(
             parameterized_path, self.config.relative_positions, self.config.uacs
+        )
+        logger.debug(
+            f"{logging.format_key(self.key)}: {len(self.result.inds)} vertices, "
+            f"alpha {logging.format_range(self.result.alpha)}, "
+            f"beta {logging.format_range(self.result.beta)}"
         )
 
 
@@ -295,7 +333,7 @@ class SegmentNode:
     submesh_result: model.Submesh | None = None
     uac_submesh_result: model.UACSubmesh | None = None
 
-    def construct_boundary(self) -> None:
+    def construct_boundary(self, logger: logging.BaseLogger) -> None:
         """Stitch this segment's boundary portions into one closed, ordered loop.
 
         Each `boundary_paths` entry contributes only the sub-range of its already-UAC-mapped path
@@ -303,11 +341,13 @@ class SegmentNode:
         -- so two segments sharing a path each get a disjoint slice of it, not the whole thing.
         `_concatenate_submesh_boundaries` then walks those slices end-to-end into a single loop.
 
+        Args:
+            logger: Receives debug messages.
+
         Raises:
             RuntimeError: If a boundary path has not been constructed yet.
             ValueError: If the slices do not form a closed loop.
         """
-        print(f"Extracting boundaries for Submesh: {logging.format_key(self.key)}")
         boundary_inds, boundary_alpha, boundary_beta = [], [], []
         for uac_node, portion in zip(self.boundary_paths, self.config.portions, strict=True):
             uac_path = _require(uac_node, self)
@@ -315,35 +355,98 @@ class SegmentNode:
                 (uac_path.relative_lengths >= portion[0])
                 & (uac_path.relative_lengths <= portion[1])
             )[0]
+            logger.debug(
+                f"{logging.format_key(self.key)}: portion {tuple(portion)} of "
+                f"{logging.format_key(uac_node.key)} takes {relevant_section.size} of "
+                f"{len(uac_path.inds)} vertices"
+            )
             boundary_inds.append(uac_path.inds[relevant_section])
             boundary_alpha.append(uac_path.alpha[relevant_section])
             boundary_beta.append(uac_path.beta[relevant_section])
 
-        unique_inds, unique_alpha, unique_beta = _concatenate_submesh_boundaries(
+        num_vertices_before = sum(len(inds) for inds in boundary_inds)
+        unique_inds, unique_alpha, unique_beta = self._concatenate_submesh_boundaries(
             boundary_inds, boundary_alpha, boundary_beta
         )
         self.boundary_result = model.UACPath(inds=unique_inds, alpha=unique_alpha, beta=unique_beta)
+        logger.debug(
+            f"  -> loop of {len(unique_inds)} vertices from "
+            f"{num_vertices_before} before removing duplicates"
+        )
 
-    def construct_submesh(self, mesh: pv.PolyData) -> None:
+    @staticmethod
+    def _concatenate_submesh_boundaries(
+        boundary_inds: list[np.ndarray],
+        boundary_alpha: list[np.ndarray],
+        boundary_beta: list[np.ndarray],
+    ) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
+        """Walk unordered boundary-portion slices end-to-end into one closed loop.
+
+        Each `boundary_*[i]` is one portion's vertex sequence, in its own path's original
+        direction -- not necessarily the direction that continues the loop, and not necessarily
+        adjacent to `boundary_*[i + 1]` in the input order. Each step finds whichever remaining
+        portion shares its endpoint with the loop built so far, flips it if it runs the wrong way,
+        and appends it; closing the loop (last endpoint == first) drops the duplicated closing
+        vertex. The input lists are consumed.
+        """
+        unique_inds = boundary_inds.pop(0)
+        unique_alpha = boundary_alpha.pop(0)
+        unique_beta = boundary_beta.pop(0)
+
+        current_end_point = unique_inds[-1]
+        while boundary_inds:
+            for i, inds in enumerate(boundary_inds):
+                if current_end_point in inds:
+                    next_segment_inds = boundary_inds.pop(i)
+                    next_segment_alpha = boundary_alpha.pop(i)
+                    next_segment_beta = boundary_beta.pop(i)
+                    break
+            else:
+                raise ValueError("Submesh boundary segments do not form a closed loop.")
+            if current_end_point == next_segment_inds[-1]:
+                next_segment_inds = next_segment_inds[::-1]
+                next_segment_alpha = next_segment_alpha[::-1]
+                next_segment_beta = next_segment_beta[::-1]
+            unique_inds = np.append(unique_inds, next_segment_inds[1:])
+            unique_alpha = np.append(unique_alpha, next_segment_alpha[1:])
+            unique_beta = np.append(unique_beta, next_segment_beta[1:])
+            current_end_point = unique_inds[-1]
+
+        if unique_inds[0] == unique_inds[-1]:
+            unique_inds = unique_inds[:-1]
+            unique_alpha = unique_alpha[:-1]
+            unique_beta = unique_beta[:-1]
+        return unique_inds, unique_alpha, unique_beta
+
+    def construct_submesh(self, mesh: pv.PolyData, logger: logging.BaseLogger) -> None:
         """Flood-fill the original mesh from this segment's boundary loop to its interior.
 
         Args:
             mesh: Triangle surface mesh the boundary indices refer to.
+            logger: Receives debug messages.
 
         Raises:
             RuntimeError: If the boundary or the outside path has not been constructed yet.
         """
-        print(f"Extracting Submesh: {logging.format_key(self.key)}")
         if self.boundary_result is None:
             raise RuntimeError(
                 f"Submesh boundary {logging.format_key(self.key)} has not been constructed yet."
             )
         outside_path = _require(self.outside_path, self)
+        logger.debug(
+            f"{logging.format_key(self.key)}: flood fill inside a boundary of "
+            f"{len(self.boundary_result.inds)} vertices"
+        )
         self.submesh_result = geometry.extract_region_from_boundary(
-            mesh, self.boundary_result.inds, outside_path
+            mesh, self.boundary_result.inds, outside_path, logger
+        )
+        logger.debug(
+            f"  -> {len(self.submesh_result.vertex_inds)} vertices and "
+            f"{len(self.submesh_result.cell_inds)} cells "
+            f"({len(self.submesh_result.cell_inds) / mesh.n_cells:.1%} of the mesh)"
         )
 
-    def construct_uacs(self, mesh: pv.PolyData) -> None:
+    def construct_uacs(self, mesh: pv.PolyData, logger: logging.BaseLogger) -> None:
         """Extend the boundary's (alpha, beta) values over the submesh interior via `mvc`.
 
         Mean-value coordinates reproduce the boundary values exactly and interpolate smoothly
@@ -352,11 +455,11 @@ class SegmentNode:
 
         Args:
             mesh: Triangle surface mesh providing vertex positions.
+            logger: Receives debug messages.
 
         Raises:
             RuntimeError: If the boundary or submesh has not been constructed yet.
         """
-        print(f"Compute UACs for submesh: {logging.format_key(self.key)}")
         submesh_boundary = self.boundary_result
         submesh = self.submesh_result
         if submesh_boundary is None or submesh is None:
@@ -372,8 +475,16 @@ class SegmentNode:
         uac_coordinates = np.hstack(
             (submesh_boundary.alpha[:, None], submesh_boundary.beta[:, None])
         )
+        mvc_start = time.perf_counter()
         mvc_map = mvc.compute_mean_value_coordinates(
             vertices, simplices, boundary_inds, uac_coordinates
+        )
+        logger.debug(
+            f"{logging.format_key(self.key)}: {len(boundary_inds)} boundary and "
+            f"{len(vertices) - len(boundary_inds)} interior vertices, "
+            f"alpha {logging.format_range(mvc_map[:, 0])}, "
+            f"beta {logging.format_range(mvc_map[:, 1])}, "
+            f"MVC took {time.perf_counter() - mvc_start:.3f} s"
         )
         self.uac_submesh_result = model.UACSubmesh(
             vertex_inds=submesh.vertex_inds,
@@ -508,7 +619,7 @@ def _resolve[T](table: dict[dict_utils.KeySequence, T], key_sequence: dict_utils
         ) from e
 
 
-# ==================================================================================================
+# --------------------------------------------------------------------------------------------------
 def _require(node: Node | None, dependent: Node) -> object:
     """Get the result a node has already computed."""
     if node is None or node.result is None:
@@ -517,47 +628,3 @@ def _require(node: Node | None, dependent: Node) -> object:
             f"{key} has not been constructed yet (required by {logging.format_key(dependent.key)})."
         )
     return node.result
-
-
-# --------------------------------------------------------------------------------------------------
-def _concatenate_submesh_boundaries(
-    boundary_inds: list[np.ndarray],
-    boundary_alpha: list[np.ndarray],
-    boundary_beta: list[np.ndarray],
-) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
-    """Walk unordered boundary-portion slices end-to-end into one closed loop.
-
-    Each `boundary_*[i]` is one portion's vertex sequence, in its own path's original direction --
-    not necessarily the direction that continues the loop, and not necessarily adjacent to
-    `boundary_*[i + 1]` in the input order. Each step finds whichever remaining portion shares its
-    endpoint with the loop built so far, flips it if it runs the wrong way, and appends it; closing
-    the loop (last endpoint == first) drops the duplicated closing vertex.
-    """
-    unique_inds = boundary_inds.pop(0)
-    unique_alpha = boundary_alpha.pop(0)
-    unique_beta = boundary_beta.pop(0)
-
-    current_end_point = unique_inds[-1]
-    while boundary_inds:
-        for i, inds in enumerate(boundary_inds):
-            if current_end_point in inds:
-                next_segment_inds = boundary_inds.pop(i)
-                next_segment_alpha = boundary_alpha.pop(i)
-                next_segment_beta = boundary_beta.pop(i)
-                break
-        else:
-            raise ValueError("Submesh boundary segments do not form a closed loop.")
-        if current_end_point == next_segment_inds[-1]:
-            next_segment_inds = next_segment_inds[::-1]
-            next_segment_alpha = next_segment_alpha[::-1]
-            next_segment_beta = next_segment_beta[::-1]
-        unique_inds = np.append(unique_inds, next_segment_inds[1:])
-        unique_alpha = np.append(unique_alpha, next_segment_alpha[1:])
-        unique_beta = np.append(unique_beta, next_segment_beta[1:])
-        current_end_point = unique_inds[-1]
-
-    if unique_inds[0] == unique_inds[-1]:
-        unique_inds = unique_inds[:-1]
-        unique_alpha = unique_alpha[:-1]
-        unique_beta = unique_beta[:-1]
-    return unique_inds, unique_alpha, unique_beta
