@@ -5,13 +5,11 @@ non-degenerate triangulation, so this generates its own random triangles.
 """
 
 import numpy as np
-import pytest
 from numpy.testing import assert_allclose
 
 from uacpy.common import jacobian
 
 
-@pytest.mark.unit
 def test_cellwise_jacobians_are_exact_for_an_affine_map():
     """Recovering the Jacobian of a known affine 2D-to-3D map must return that exact map.
 

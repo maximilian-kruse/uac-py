@@ -9,14 +9,8 @@ just loosen the assertions to make it pass).
 
 import numpy as np
 import pytest
-import pyvista as pv
 
-from uacpy.anatomies import left_atrium_4_pvs as config
-from uacpy.common import mesh_utils
-from uacpy.construction import check, constructor
-
-MESH_PATH = "data/patient_01/mesh_with_fibers_tags.vtu"
-ANATOMICAL_TAGS = {"MV": 0, "LAA": 1, "LIPV": 2, "LSPV": 3, "RIPV": 4, "RSPV": 5}
+from uacpy.construction import check
 
 # (n_vertices, n_cells, alpha_min, alpha_max, beta_min, beta_max) per submesh, keyed as
 # the flattened key sequences of `submesh_configs`.
@@ -53,60 +47,24 @@ MESH_POINT_COUNT = 15820
 MESH_CELL_COUNT = 31375
 
 
-@pytest.mark.unit
-def test_segment_boundary_multiplicity():
-    """Purely structural, on the config alone -- no mesh needed, so this runs fast."""
-    assert check.check_segment_boundary_multiplicity(
-        path_config=config.path_configs,
-        marker_config=config.marker_configs,
-        parameterization_config=config.parameterization_configs,
-        uac_config=config.uac_configs,
-        submesh_config=config.submesh_configs,
-    )
-
-
-@pytest.fixture(scope="module")
-def uac_data():
-    """The `UACData` from running the full LA pipeline once on the patient mesh."""
-    mesh = pv.read(MESH_PATH)
-    mesh = mesh_utils.convert_unstructured_to_polydata_mesh(mesh)
-    assert mesh.n_points == MESH_POINT_COUNT, "input mesh changed -- regenerate the snapshot"
-    assert mesh.n_cells == MESH_CELL_COUNT, "input mesh changed -- regenerate the snapshot"
-
-    settings = constructor.UACConstructorSettings(
-        mesh=mesh,
-        feature_tags=ANATOMICAL_TAGS,
-        path_config=config.path_configs,
-        marker_config=config.marker_configs,
-        parameterization_config=config.parameterization_configs,
-        uac_config=config.uac_configs,
-        submesh_config=config.submesh_configs,
-    )
-    uac_constructor = constructor.UACConstructor(settings)
-    uac_constructor.construct_segmentation()
-    uac_constructor.construct_uacs()
-    return uac_constructor.data
-
-
-@pytest.mark.integration
 @pytest.mark.slow
-def test_uac_mesh_is_valid(uac_data):
+def test_uac_mesh_is_valid(patient_01_uac_data):
     """No UAC submesh has a folded-over cell."""
-    assert check.check_uac_mesh_validity(uac_data.uac_submesh_data)
+    assert check.check_uac_mesh_validity(patient_01_uac_data.uac_submesh_data)
 
 
-@pytest.mark.integration
 @pytest.mark.slow
-def test_uac_tiling(uac_data):
+def test_uac_tiling(patient_01_uac_data):
     """No two segments overlap in UAC space."""
-    assert check.check_uac_tiling(uac_data.submesh_boundary_data)
+    assert check.check_uac_tiling(patient_01_uac_data.submesh_boundary_data)
 
 
-@pytest.mark.integration
 @pytest.mark.slow
-def test_uac_mesh_matches_snapshot(uac_data):
+def test_uac_mesh_matches_snapshot(patient_01_mesh, patient_01_uac_data):
     """Per-segment vertex/cell counts and (alpha, beta) ranges equal the pinned snapshot."""
-    uac_submesh_data = uac_data.uac_submesh_data
+    assert patient_01_mesh.n_points == MESH_POINT_COUNT, "input mesh changed -- regenerate snapshot"
+    assert patient_01_mesh.n_cells == MESH_CELL_COUNT, "input mesh changed -- regenerate snapshot"
+    uac_submesh_data = patient_01_uac_data.uac_submesh_data
     assert uac_submesh_data.keys() == SNAPSHOT.keys(), (
         "segment set changed -- regenerate the snapshot"
     )

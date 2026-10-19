@@ -9,7 +9,6 @@ field, since resampling between two different triangulations is otherwise approx
 """
 
 import numpy as np
-import pytest
 import pyvista as pv
 from numpy.testing import assert_allclose
 
@@ -45,7 +44,6 @@ def _build_single_segment_mapper() -> mapper.UACMapper:
     )
 
 
-@pytest.mark.unit
 def test_scalar_field_round_trips_exactly_through_uac_space():
     """original -> UAC -> original must be the identity: `cell_inds` is a bijection here (one
     segment covering the whole mesh, no overlap), so the gather/scatter is exact, not approximate.
@@ -79,7 +77,6 @@ def _build_mapper_over_shared_uac_domain(original_mesh_vertices: np.ndarray) -> 
     )
 
 
-@pytest.mark.unit
 def test_interpolate_to_other_uac_mesh_reproduces_a_constant_field():
     """A constant scalar field, resampled onto a different patient's mapper that shares this
     segment's UAC domain, must come back exactly that same constant everywhere -- interpolating a
@@ -100,7 +97,6 @@ def test_interpolate_to_other_uac_mesh_reproduces_a_constant_field():
     assert_allclose(transferred[("seg",)], [5.0, 5.0])
 
 
-@pytest.mark.unit
 def test_vector_field_round_trips_exactly_through_uac_space():
     """UAC -> original -> UAC must be the identity: mapping a 2D UAC vector into 3D applies the
     per-cell Jacobian `J` (embedding the tangent plane), and mapping back applies its Moore-Penrose
@@ -138,7 +134,6 @@ def _build_mapper_from_triangulation(
     )
 
 
-@pytest.mark.unit
 def test_nearest_transfer_onto_itself_is_exact():
     """The centroid of every cell lies in that very cell of the same mesh, so a field transferred
     onto its own mesh comes back unchanged."""
@@ -150,7 +145,6 @@ def test_nearest_transfer_onto_itself_is_exact():
     assert_allclose(transferred[("seg",)], field[("seg",)])
 
 
-@pytest.mark.unit
 def test_nearest_transfer_takes_the_value_of_the_containing_cell():
     """The source is the unit square cut along its diagonal, the target the same square cut into
     four triangles around its center. The centroids of the two target triangles below the
@@ -171,7 +165,6 @@ def test_nearest_transfer_takes_the_value_of_the_containing_cell():
     assert_allclose(transferred[("seg",)], [10.0, 10.0, 20.0, 20.0])
 
 
-@pytest.mark.unit
 def test_transfer_keeps_the_sign_and_length_of_vectors():
     """Nearest-neighbor transfer copies vectors as they are, so opposite fibers of one axis stay
     opposite and keep their lengths (nothing is averaged, so nothing cancels)."""
@@ -189,7 +182,6 @@ def test_transfer_keeps_the_sign_and_length_of_vectors():
     assert_allclose(transferred[("seg",)], field[("seg",)])
 
 
-@pytest.mark.unit
 def test_normalized_mapping_to_the_original_mesh_gives_unit_vectors_of_the_same_direction():
     """`normalize=True` only rescales: the mapped vectors are the unit vectors of the unnormalized
     ones, however much the Jacobian of a cell stretches them."""

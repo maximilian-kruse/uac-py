@@ -7,13 +7,11 @@ no cheaper way to reach this logic than through the full mesh pipeline otherwise
 """
 
 import numpy as np
-import pytest
 from numpy.testing import assert_allclose
 
 from uacpy import basis
 
 
-@pytest.mark.unit
 def test_map_path_to_circle_places_points_evenly_spaced_on_the_circle():
     """Every mapped point lies on the circle, evenly spaced in angle."""
     radius = 2.5
@@ -26,7 +24,6 @@ def test_map_path_to_circle_places_points_evenly_spaced_on_the_circle():
     assert_allclose(np.diff(angles), 2 * np.pi / len(path))
 
 
-@pytest.mark.unit
 def test_orthonormalize_jacobian_columns_preserves_the_tangent_plane():
     """The output basis must be orthonormal and span the same 2D subspace as the input Jacobian --
     properties any valid orthonormalization must have, independent of the particular algorithm

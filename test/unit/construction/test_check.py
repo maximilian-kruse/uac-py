@@ -12,7 +12,6 @@ import pytest
 from uacpy.construction import check, model
 
 
-@pytest.mark.unit
 def test_uac_mesh_validity_detects_a_foldover():
     """A degenerate (collinear) triangle has zero area, which the fold-over check must reject."""
     degenerate_submesh = model.UACSubmesh(
@@ -26,7 +25,6 @@ def test_uac_mesh_validity_detects_a_foldover():
     assert not check.check_uac_mesh_validity({"seg": degenerate_submesh})
 
 
-@pytest.mark.unit
 def test_uac_mesh_validity_accepts_a_regular_triangle():
     """The mirror-image case: a single non-degenerate triangle must pass."""
     valid_submesh = model.UACSubmesh(
@@ -65,7 +63,6 @@ def _single_boundary_configs(num_segments: int) -> dict:
     }
 
 
-@pytest.mark.unit
 def test_segment_boundary_multiplicity_detects_a_triple_reference():
     """A boundary portion referenced by 3 segments is neither an outer edge (1) nor a shared
     interior edge (2), so it must be flagged invalid.
@@ -73,7 +70,6 @@ def test_segment_boundary_multiplicity_detects_a_triple_reference():
     assert not check.check_segment_boundary_multiplicity(**_single_boundary_configs(3))
 
 
-@pytest.mark.unit
 @pytest.mark.parametrize("num_segments", [1, 2])
 def test_segment_boundary_multiplicity_accepts_one_or_two_references(num_segments):
     """The two legitimate cases: an outer mesh edge (1 segment) or a shared interior edge (2)."""
@@ -91,7 +87,6 @@ def _square_boundary(offset: float) -> model.UACPath:
     )
 
 
-@pytest.mark.unit
 def test_uac_tiling_detects_an_overlap():
     """Two unit squares offset by half a unit overlap in a 0.5x0.5 region -- must be rejected."""
     submesh_boundary_data = {"a": _square_boundary(0.0), "b": _square_boundary(0.5)}
@@ -99,7 +94,6 @@ def test_uac_tiling_detects_an_overlap():
     assert not check.check_uac_tiling(submesh_boundary_data)
 
 
-@pytest.mark.unit
 def test_uac_tiling_accepts_disjoint_segments():
     """The mirror-image case: two unit squares offset by a full unit don't overlap at all."""
     submesh_boundary_data = {"a": _square_boundary(0.0), "b": _square_boundary(1.0)}

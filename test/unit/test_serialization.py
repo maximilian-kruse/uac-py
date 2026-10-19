@@ -5,7 +5,6 @@ flat keyed shape `UACConstructor.data.uac_submesh_data` would produce.
 """
 
 import numpy as np
-import pytest
 from numpy.testing import assert_allclose
 
 from uacpy.construction import model
@@ -22,7 +21,6 @@ def _submesh(offset: float = 0.0) -> model.UACSubmesh:
     )
 
 
-@pytest.mark.unit
 def test_uac_submeshdata_round_trips_exactly_through_a_file(tmp_path):
     """Saving then loading reproduces every field of every keyed `UACSubmesh` exactly."""
     submesh_data = {("LIPV", "segment_1"): _submesh(), ("roof",): _submesh(2.0)}

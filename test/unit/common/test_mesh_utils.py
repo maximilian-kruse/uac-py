@@ -10,7 +10,6 @@ derived from any real geometry.
 """
 
 import numpy as np
-import pytest
 import pyvista as pv
 from numpy.testing import assert_array_equal
 
@@ -35,7 +34,6 @@ def _build_closed_hexagon_fan() -> tuple[np.ndarray, list[list[int]]]:
     return points, fan_faces
 
 
-@pytest.mark.unit
 def test_fix_feature_tag_defects_chains_all_four_stages():
     """A feature-tag spike (untagged by stage 2), once untagged, is now a plain boundary spike
     (unrelated to any tag) that stage 4 must go on to remove entirely -- exercising the actual
@@ -55,7 +53,6 @@ def test_fix_feature_tag_defects_chains_all_four_stages():
     assert_array_equal(fixed.cell_data["anatomical_tags"], [1] * 6)
 
 
-@pytest.mark.unit
 def test_fix_boundary_spikes_removes_a_single_neighbor_cell_and_its_orphaned_point():
     """A triangle attached to the fan by only one edge (its other vertex is its own, unshared
     point) has exactly 1 neighbor mesh-wide, regardless of tagging -- `_fix_boundary_spikes` must
@@ -73,7 +70,6 @@ def test_fix_boundary_spikes_removes_a_single_neighbor_cell_and_its_orphaned_poi
     assert fixed.n_points == 7
 
 
-@pytest.mark.unit
 def test_fix_feature_tag_dangles_keeps_only_the_largest_connected_component():
     """Two geometrically disjoint patches sharing the same tag: the smaller one is a "dangle" that
     must be untagged, the larger one (the real feature) must keep its tag.
@@ -98,7 +94,6 @@ def test_fix_feature_tag_dangles_keeps_only_the_largest_connected_component():
     assert_array_equal(fixed.cell_data["anatomical_tags"], [1, 1, 0])
 
 
-@pytest.mark.unit
 def test_fix_feature_tag_spikes_untags_a_single_neighbor_cell_within_its_own_tag():
     """The same fan-plus-spike shape as the boundary-spike test, but now entirely tagged as one
     feature: the spike (1 neighbor within the tag's own region) must be untagged, the fan must not.
@@ -115,7 +110,6 @@ def test_fix_feature_tag_spikes_untags_a_single_neighbor_cell_within_its_own_tag
     assert_array_equal(fixed.cell_data["anatomical_tags"], [1, 1, 1, 1, 1, 1, 0])
 
 
-@pytest.mark.unit
 def test_fix_body_tag_spikes_reassigns_a_single_neighbor_untagged_cell_to_its_surrounding_tag():
     """The untagged-body mirror of the feature-tag-spike case: a tag-0 spike attached to a tag-0
     fan by one edge, but whose other two edges border a tag-1 region, must be reassigned to tag 1

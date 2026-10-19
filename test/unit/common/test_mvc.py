@@ -5,7 +5,6 @@ invariants under test (boundary reproduction, affine/linear precision) hold for 
 """
 
 import numpy as np
-import pytest
 from numpy.testing import assert_allclose
 
 from uacpy.common import mvc
@@ -46,7 +45,6 @@ def _build_grid_mesh(n: int) -> tuple[np.ndarray, np.ndarray, np.ndarray]:
     return vertices, simplices, boundary_inds
 
 
-@pytest.mark.unit
 def test_mvc_reproduces_boundary_values_exactly():
     """The result at `boundary_inds` must equal `boundary_coordinates`, for arbitrary targets."""
     vertices, simplices, boundary_inds = _build_grid_mesh(5)
@@ -60,7 +58,6 @@ def test_mvc_reproduces_boundary_values_exactly():
     assert_allclose(uacs[boundary_inds], boundary_coordinates)
 
 
-@pytest.mark.unit
 def test_mvc_reproduces_affine_functions_exactly():
     """Mean value coordinates are generalized barycentric coordinates: for any vertex, the
     (normalized) weighted sum of its one-ring neighbours' own positions reproduces that vertex's

@@ -102,6 +102,8 @@ test = { features = ["test"], solve-group = "default" }
 # --- Tasks ----------------------------------------------------------------------------------------
 
 [tool.pixi.tasks]
+test-unit = { cmd = "pytest test/unit", description = "Fast unit tests on synthetic data", default-environment = "test" }
+test-integration = { cmd = "pytest test/integration", description = "Regression tests on the real patient data", default-environment = "test" }
 
 
 # ==================================================================================================
